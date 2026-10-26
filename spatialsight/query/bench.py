@@ -56,63 +56,62 @@ def _norm_rows(rows) -> list[tuple]:
     return [tuple(_norm(v) for v in row) for row in rows]
 
 
-def _columns(rows: list[tuple], width: int) -> list[Counter]:
-    return [Counter(row[i] for row in rows) for i in range(width)]
+def _aligns(
+    src_rows: list[tuple],
+    src_cols: list[int],
+    dst_rows: list[tuple],
+    dst_width: int,
+    *,
+    ordered: bool,
+) -> bool:
+    """Is there an injective map `src_cols` -> destination columns under which
+    the two row sets agree?
 
+    `ordered` compares row sequences position by position, which is what a
+    top-k claim requires: if the model returned 1 of 3 rows, it is asserting
+    that row is the *first*. When the model returned every row it is making
+    no such claim, so row order is immaterial and multisets are compared --
+    otherwise a correct answer sorted differently reads as wrong.
 
-def _embeds(wanted: list[Counter], available: list[Counter]) -> bool:
-    """Can every `wanted` column be matched to a distinct `available` one?"""
-    used: set[int] = set()
-    for column in wanted:
-        match = next(
-            (j for j, candidate in enumerate(available) if j not in used and candidate == column),
-            None,
-        )
-        if match is None:
-            return False
-        used.add(match)
-    return True
-
-
-def _is_top_k(ref: list[tuple], ref_width: int, model: list[tuple], model_width: int) -> bool:
-    """Are the model's rows the reference's first k rows, with fewer columns?
-
-    Each model column must equal some reference column over those k rows, in
-    order, and no two model columns may claim the same reference column.
+    The final check is on whole projected rows, not column by column. Matching
+    each column's values independently would accept a table whose columns are
+    individually right and whose rows pair them up wrongly.
     """
-    k = len(model)
-    head = ref[:k]
-    candidates = [
-        {j for j in range(ref_width) if [row[j] for row in head] == [row[i] for row in model]}
-        for i in range(model_width)
-    ]
-    if any(not c for c in candidates):
+    if len(src_rows) != len(dst_rows):
         return False
 
-    def assign(i: int, used: frozenset[int]) -> bool:
-        if i == model_width:
-            return True
-        return any(assign(i + 1, used | {j}) for j in candidates[i] if j not in used)
+    def src_col(j: int) -> list:
+        return [row[j] for row in src_rows]
 
-    return assign(0, frozenset())
+    def dst_col(i: int) -> list:
+        return [row[i] for row in dst_rows]
 
+    candidates: list[set[int]] = []
+    for j in src_cols:
+        values = src_col(j)
+        if ordered:
+            matches = {i for i in range(dst_width) if dst_col(i) == values}
+        else:
+            wanted = Counter(values)
+            matches = {i for i in range(dst_width) if Counter(dst_col(i)) == wanted}
+        if not matches:
+            return False
+        candidates.append(matches)
 
-def _covers(ref: list[tuple], wanted: list[int], model: list[tuple], model_width: int) -> bool:
-    """Does the model's top-k carry every required reference column?"""
-    head = ref[: len(model)]
-    candidates = [
-        {i for i in range(model_width) if [row[i] for row in model] == [row[j] for row in head]}
-        for j in wanted
-    ]
-    if any(not c for c in candidates):
-        return False
+    projected_src = [tuple(row[j] for j in src_cols) for row in src_rows]
 
-    def assign(n: int, used: frozenset[int]) -> bool:
+    def assign(n: int, used: frozenset[int], chosen: list[int]) -> bool:
         if n == len(candidates):
-            return True
-        return any(assign(n + 1, used | {i}) for i in candidates[n] if i not in used)
+            projected_dst = [tuple(row[i] for i in chosen) for row in dst_rows]
+            if ordered:
+                return projected_src == projected_dst
+            return Counter(projected_src) == Counter(projected_dst)
+        for i in sorted(candidates[n]):
+            if i not in used and assign(n + 1, used | {i}, chosen + [i]):
+                return True
+        return False
 
-    return assign(0, frozenset())
+    return assign(0, frozenset(), [])
 
 
 def compare(reference_rows, reference_cols, model_rows, model_cols, required=()) -> str:
@@ -123,14 +122,19 @@ def compare(reference_rows, reference_cols, model_rows, model_cols, required=())
 
     if not ref and not model:
         return "exact"
-    if not model or not model_width:
+    if not model or not model_width or len(model) > len(ref):
         return "miss"
 
     if ref_width == model_width and Counter(ref) == Counter(model):
         return "exact"
 
-    if model_width > ref_width and len(model) == len(ref):
-        if _embeds(_columns(ref, ref_width), _columns(model, model_width)):
+    # Fewer rows than the reference is a claim about *which* rows: the top
+    # ones. Equal rows is no such claim, so order stops mattering.
+    ordered = len(model) < len(ref)
+    head = ref[: len(model)]
+
+    if model_width > ref_width and not ordered:
+        if _aligns(ref, list(range(ref_width)), model, model_width, ordered=False):
             return "contains"
 
     # Required columns gate every remaining verdict. Without this, a model
@@ -139,13 +143,16 @@ def compare(reference_rows, reference_cols, model_rows, model_cols, required=())
     # pass, having returned neither the dwell nor the frame.
     wanted = [reference_cols.index(c) for c in required if c in reference_cols]
     has_required = (
-        len(wanted) == len(required) and _covers(ref, wanted, model, model_width)
+        len(wanted) == len(required)
+        and _aligns(head, wanted, model, model_width, ordered=ordered)
         if required
         else True
     )
 
-    if has_required and len(model) <= len(ref):
-        if model_width <= ref_width and _is_top_k(ref, ref_width, model, model_width):
+    if has_required:
+        if model_width <= ref_width and _aligns(
+            model, list(range(model_width)), head, ref_width, ordered=ordered
+        ):
             return "subset"
         # A different projection, carrying everything the question asked for.
         if required:

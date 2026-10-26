@@ -162,3 +162,35 @@ def test_manifest_keeps_the_concept_mapping_after_an_ingest(api):
     )
     assert entry["zones_path"].endswith("synthetic-01.json")
     assert entry["zone_names"]
+
+
+def test_manifest_records_how_to_reproduce_the_detections(tmp_path):
+    """Anything a backend keys its cache on must be written beside the clip.
+
+    Without this the overlay endpoint rebuilt the backend with default
+    weights and image size, missed the cache keyed on the real ones, and
+    tried to re-run the model.
+    """
+    import json as _json
+
+    from spatialsight.backends.base import SegmentationBackend
+    from spatialsight.backends.synthetic import SyntheticBackend as _Synth
+
+    class Keyed(_Synth):
+        name = "keyed"
+
+        def manifest_extra(self) -> dict:
+            return {"weights": "w.pt", "imgsz": 320}
+
+    db = tmp_path / "db" / "m.sqlite"
+    run(
+        backend=Keyed("synthetic-01"),
+        clip="synthetic-01",
+        zones_path="zones/synthetic-01.json",
+        db_path=db,
+    )
+    entry = _json.loads((db.parent / "clips.json").read_text(encoding="utf-8"))["synthetic-01"]
+    assert entry["weights"] == "w.pt"
+    assert entry["imgsz"] == 320
+    # A backend that declares nothing must still write a usable entry.
+    assert isinstance(SegmentationBackend.manifest_extra(_Synth("x")), dict)

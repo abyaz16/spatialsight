@@ -268,3 +268,32 @@ def test_meta_key_alone_enables_both(monkeypatch):
     cfg = config.load()
     assert cfg.has_key and cfg.has_llm
     assert cfg.llm_api_key == "meta_test"
+
+
+# ----- order only matters for a top-k claim ---------------------------------
+
+
+def test_same_rows_in_a_different_order_with_a_different_projection_covers():
+    # The real case: the model returned all 11 open visits, correct, but
+    # sorted by clip instead of by dwell and carrying `clip` where the
+    # reference carried `class`.
+    ref = [(4, "vehicle", "east_road", 79.4), (29, "person", "west_path", 1.1)]
+    ref_cols = ["entity_id", "class", "zone", "dwell_s"]
+    model = [(29, "west_path", 1.1), (4, "east_road", 79.4)]  # reverse order
+    model_cols = ["entity_id", "zone", "dwell_s"]
+    assert compare(ref, ref_cols, model, model_cols, required=("entity_id", "zone")) == "subset"
+
+
+def test_a_prefix_claim_still_requires_the_right_order():
+    ref = [("a", 3.0), ("b", 2.0), ("c", 1.0)]
+    # One row out of three asserts it is the top one; 'c' is the bottom.
+    assert compare(ref, ["z", "v"], [("c", 1.0)], ["z", "v"], required=("z",)) == "miss"
+    assert compare(ref, ["z", "v"], [("a", 3.0)], ["z", "v"], required=("z",)) == "subset"
+
+
+def test_columns_right_individually_but_rows_paired_wrongly_is_a_miss():
+    # Both columns hold the same values as the reference, but the pairing is
+    # scrambled: zone 'a' had 1.0, not 2.0. A column-wise check would pass it.
+    ref = [("a", 1.0), ("b", 2.0)]
+    scrambled = [("a", 2.0), ("b", 1.0)]
+    assert compare(ref, ["zone", "v"], scrambled, ["zone", "v"]) == "miss"

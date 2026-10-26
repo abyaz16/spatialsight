@@ -61,6 +61,28 @@ def test_the_hard_overlap_query_finds_the_scripted_overlap(db):
     assert "overlap_s" in result.columns
 
 
+def test_no_canned_query_merges_entities_across_clips(db):
+    """entity_id is unique only within a clip.
+
+    With two clips loaded, grouping by entity_id alone silently merges a
+    person in one clip with a person in another, and the row looks perfectly
+    plausible. Any reference query that groups or joins on entity_id must
+    carry clip too.
+    """
+    for q in QUESTIONS:
+        sql = " ".join(q.sql.lower().split())
+        if "group by" not in sql:
+            continue
+        grouped = sql.split("group by", 1)[1]
+        for terminator in (" having", " order by", " limit", ")"):
+            grouped = grouped.split(terminator, 1)[0]
+        if "entity_id" in grouped:
+            assert "clip" in grouped, (
+                f"{q.key} groups by entity_id without clip, which merges "
+                f"entities from different clips: GROUP BY{grouped}"
+            )
+
+
 def test_median_query_returns_one_row_per_zone(db):
     from spatialsight.query.canned import BY_KEY
 

@@ -20,3 +20,14 @@ class SegmentationBackend(Protocol):
     def meta(self) -> VideoMeta: ...
 
     def detect(self, labels: Sequence[str]) -> list[Detection]: ...
+
+    def manifest_extra(self) -> dict:
+        """Everything needed to reproduce this clip's detections from cache.
+
+        Optional, and the reason it exists is a bug: without it the clip
+        manifest recorded only the backend's name, so a later reader rebuilt
+        the backend with default parameters, missed the cache keyed on the
+        real ones, and tried to re-run the model. Whatever goes into a cache
+        key has to be written down beside it.
+        """
+        return {}

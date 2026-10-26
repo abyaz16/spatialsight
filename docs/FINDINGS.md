@@ -68,10 +68,43 @@ prompt now states the division explicitly:
 > Because the times are seconds, a question about minutes needs the division:
 > `CAST(entered_at / 60 AS INTEGER)`.
 
-**Final: 10/10 answered** — 4 exact, 1 with extra columns, 5 top-of-ranking.
-The two hardest questions both passed exactly: the interval-overlap self-join
-(`concurrent_dock_occupancy`) and the median via window functions, which has
-no `median()` in SQLite.
+### A third comparator bug, found by a second clip
+
+Loading a real clip alongside the synthetic one made the benchmark harder and
+exposed one more flaw: the comparator demanded row order even when the model
+had returned **every** row and merely sorted it differently. Returning 1 row
+of 3 is a claim that it is the *top* row, so order matters. Returning all 3
+makes no such claim. Two correct answers were being marked wrong for this.
+
+Order is now required only for a strict prefix. The final check also compares
+whole projected rows rather than each column independently, because a
+column-wise check accepts a table whose columns are individually right and
+whose rows pair them up wrongly. (`test_columns_right_individually_but_rows_paired_wrongly_is_a_miss`)
+
+### Result, and the instability behind it
+
+**9–10 of 10 answered**, measured on the two-clip database (6 zones, 165
+events). Typical split: 3 exact, 1 with extra columns, 4 top-of-ranking, 2 a
+different projection.
+
+One question is genuinely unstable. `median_dwell` alternates between two
+answers across runs at `temperature=0`:
+
+```sql
+-- correct: the true median
+ROW_NUMBER() OVER (PARTITION BY zone ORDER BY dwell_s) ...
+WHERE row_num = (count_rows + 1) / 2 OR row_num = (count_rows + 2) / 2
+
+-- wrong: the mean of the upper half, which is not a median
+NTILE(2) OVER (PARTITION BY zone ORDER BY dwell_s) ... WHERE ntile = 2
+```
+
+Over four runs it passed twice and failed twice. SQLite has no `median()`, and
+the model does not reliably know the window-function construction for one.
+Reporting a single 10/10 would hide that, so the figure is a range.
+
+The interval-overlap self-join (`concurrent_dock_occupancy`) passed every run,
+which was the question expected to be hardest.
 
 ---
 
@@ -117,7 +150,47 @@ and the reason the two are reported separately.
 
 ---
 
-## 3. The machine, not the code, set the ceiling
+### What the overlay shows
+
+![masks and zones on real frames](img/plaza-01-overlay.png)
+
+Three frames with masks, zones and entity ids drawn. Masks sit tightly on the
+people, the zones follow the walkways, and the parked vans are classed as
+vehicles inside `east_road`. The same image also shows the inflation plainly:
+by frame 650 the ids are in the forties for people who have been walking since
+the start.
+
+---
+
+## 3. A second clip exposed a schema bug that one clip could never reveal
+
+`entity_id` is unique only **within** a clip — the table is keyed on
+`(clip, entity_id)`. Every reference query that grouped by `entity_id` alone
+was therefore wrong as soon as a second clip existed, and wrong in the worst
+way: it produced plausible rows.
+
+```
+entity_id  zones_visited  zones
+1          4              packing_bench,west_path,lamp_crossing,east_road
+```
+
+Entity 1 did not visit four zones. A person in the warehouse and a person in
+the plaza were merged into one row. Nothing errors, nothing looks odd, and the
+number is simply false.
+
+Fixed in the reference SQL, in the prompt (the model is now told explicitly
+that a `GROUP BY` or `JOIN` on `entity_id` must carry `clip`), and pinned by a
+test that scans every canned query's `GROUP BY` for `entity_id` without
+`clip`.
+
+The lesson is about test data rather than SQL: the synthetic clip could not
+have caught this, because with one clip the query is correct. A second clip
+cost nothing and found a bug that would have produced confidently wrong
+answers in front of a judge.
+
+---
+
+## 4. The machine, not the code, set the ceiling
 
 Windows had used 27.8 GB of its 28.7 GB commit limit, and the page file could
 not grow because C: had 0.24 GB free.
@@ -137,7 +210,7 @@ defaults to `%APPDATA%` on C:.
 
 ---
 
-## 4. What this does and does not establish
+## 5. What this does and does not establish
 
 **Does:** the pipeline runs end to end on real footage. Segmentation,
 re-identification, pixel-level zone occupancy, hysteresis, SQL compilation,

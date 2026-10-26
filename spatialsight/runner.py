@@ -82,6 +82,9 @@ def run(
             # list of names, which then reads as a missing zone file.
             "zones_path": str(Path(zones_path)),
             "zone_names": list(zone_set.names),
+            # Whatever the backend keys its cache on, so a later reader can
+            # rebuild it identically instead of re-running the model.
+            **getattr(backend, "manifest_extra", dict)(),
         },
     )
 

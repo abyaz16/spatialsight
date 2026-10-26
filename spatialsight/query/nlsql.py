@@ -48,6 +48,10 @@ Rules:
 - Prefer returning frame_start alongside any row a user might want to seek
   to in the video.
 - When the question implies a ranking, include ORDER BY.
+- entity_id is unique only WITHIN a clip. Entity 1 of one clip is a
+  different object from entity 1 of another, so any GROUP BY or JOIN on
+  entity_id must include clip as well, or two unrelated objects merge
+  into one.
 - Never write anything other than a SELECT.\
 """
 

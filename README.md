@@ -39,12 +39,41 @@ PIP_TARGET= PYTHONPATH= ./.venv/Scripts/python.exe -m pip install -r requirement
 > thread, so they set `OPENBLAS_NUM_THREADS=1`. Both are set for you in
 > `scripts/*`.
 
-With a key, natural language turns on:
+## Natural language, with or without the Meta key
+
+`ss ask` and `ss bench` run against any OpenAI-compatible endpoint, so the
+text side can be exercised before the Meta Model API key arrives:
 
 ```bash
-cp .env.example .env     # add MODEL_API_KEY from dev.meta.ai
+cp .env.example .env
+# Either: the Meta Model API (Muse Spark) --
+#   MODEL_API_KEY=...
+# or any OpenAI-compatible endpoint, e.g. a Meta open-weights model --
+#   LLM_BASE_URL=https://openrouter.ai/api/v1
+#   LLM_MODEL=meta-llama/llama-3.3-70b-instruct
+#   LLM_API_KEY=...
+#   LLM_API_STYLE=chat
+
 ./scripts/ss ask "which zone had the longest average dwell?"
+./scripts/ss bench                # score the ten reference questions
 ```
+
+A text-model key never unlocks paid SAM 3.1 calls; those need `MODEL_API_KEY`.
+
+## Real footage before the key
+
+`ss ingest --local` swaps SAM 3.1 for a free local stand-in (YOLO11-seg with
+ByteTrack) that emits the same `Detection`s, so the tracker, zones, events and
+SQL cannot tell which ran:
+
+```bash
+./scripts/ss convert raw.avi data/clips/plaza-01.mp4   # H.264 MP4, as SAM wants
+./scripts/ss poster data/clips/plaza-01.mp4 frame.png  # draw zones against this
+./scripts/ss ingest plaza-01 --video data/clips/plaza-01.mp4 --local
+```
+
+It is a test stand-in, not a Meta model, and no submission number comes from
+it. See [docs/FINDINGS.md](docs/FINDINGS.md) for what it found.
 
 ---
 

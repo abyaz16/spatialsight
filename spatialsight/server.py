@@ -206,11 +206,14 @@ class Api:
             path = Path(entry["path"])
             if not path.is_absolute():
                 path = config.REPO_ROOT / path
-            # Cached on first ingest, so this is a file read, not a GPU pass.
+            # Rebuilt with the parameters the manifest recorded, so this is a
+            # cache read rather than a second pass over the video.
             return LocalBackend(
                 path,
                 cache_dir=self.cfg.cache_dir,
-                weights=entry.get("weights", "E:/models/yolo11s-seg.pt"),
+                weights=entry["weights"],
+                imgsz=entry["imgsz"],
+                conf=entry["conf"],
             ).detect()
         if entry.get("backend") == "fixture" or "concepts" in entry:
             from .backends.sam import CachedSamBackend

@@ -95,12 +95,12 @@ LIMIT 5
         key="time_per_entity_in_dock",
         question="Which entity spent the most total time in the loading dock?",
         sql="""
-SELECT entity_id, class,
+SELECT clip, entity_id, class,
        ROUND(SUM(dwell_s), 1) AS total_dwell_s,
        COUNT(*) AS visits
 FROM events
 WHERE zone = 'loading_dock'
-GROUP BY entity_id, class
+GROUP BY clip, entity_id, class
 ORDER BY total_dwell_s DESC
 """,
             must_have=('entity_id',),
@@ -109,11 +109,11 @@ ORDER BY total_dwell_s DESC
         key="multi_zone_entities",
         question="Which entities visited more than one zone?",
         sql="""
-SELECT entity_id, class,
+SELECT clip, entity_id, class,
        COUNT(DISTINCT zone) AS zones_visited,
        GROUP_CONCAT(DISTINCT zone) AS zones
 FROM events
-GROUP BY entity_id, class
+GROUP BY clip, entity_id, class
 HAVING COUNT(DISTINCT zone) > 1
 ORDER BY zones_visited DESC
 """,

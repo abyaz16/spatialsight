@@ -116,6 +116,16 @@ class LocalBackend:
             self._meta = probe_video(self.video_path, strict=False)
         return self._meta
 
+    def manifest_extra(self) -> dict:
+        """The parameters this backend's cache key is built from."""
+        return {
+            "weights": str(self.weights),
+            "imgsz": self.imgsz,
+            "conf": self.conf,
+            "mask_res": MASK_RES,
+            "tracker": "bytetrack",
+        }
+
     def _cache_path(self) -> Path:
         meta = self.meta()
         key = "|".join(
