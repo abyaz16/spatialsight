@@ -152,7 +152,13 @@ def run_readonly(
 ) -> QueryResult:
     """Validate, then execute against a read-only, authorizer-locked connection."""
     guard = guard or SqlGuard()
-    safe = guard_sql(sql, guard)
+    checked = guard.check(sql)
+    # Whether the row cap is ours or the model's changes what hitting it
+    # means. A model that writes `LIMIT 1` for "which zone had the longest
+    # dwell?" received exactly what it asked for; calling that truncated
+    # makes the brief warn about missing data that was never wanted.
+    cap_is_ours = not _LIMIT_CLAUSE.search(guard._strip_for_analysis(checked))
+    safe = guard.with_limit(checked)
 
     con = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True, timeout=timeout_s)
     try:
@@ -177,7 +183,7 @@ def run_readonly(
             sql=safe,
             columns=columns,
             rows=[tuple(r) for r in rows],
-            truncated=len(rows) >= cap,
+            truncated=cap_is_ours and len(rows) >= cap,
         )
     finally:
         con.close()

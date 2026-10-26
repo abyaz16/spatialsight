@@ -201,6 +201,7 @@ def cmd_ingest(args) -> int:
             model=cfg.sam_model,
             cache_dir=cfg.cache_dir,
             allow_spend=args.allow_spend,
+            budget_usd=args.budget,
         )
         if args.allow_spend:
             print(f"estimated spend for this clip: ${backend.estimate_cost_usd():.4f}")
@@ -492,6 +493,13 @@ def build_parser() -> argparse.ArgumentParser:
     ing.add_argument("--imgsz", type=int, default=960)
     ing.add_argument("--zones", default=None)
     ing.add_argument("--allow-spend", action="store_true", help="permit paid API calls")
+    ing.add_argument(
+        "--budget",
+        type=float,
+        default=5.0,
+        help="hard ceiling in USD for this run; --allow-spend permits "
+        "spending, it does not make it unlimited",
+    )
     ing.add_argument(
         "--max-gap-seconds",
         type=float,

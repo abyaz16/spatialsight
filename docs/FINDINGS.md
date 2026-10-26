@@ -300,7 +300,63 @@ rate, decides — so it is exposed as `--max-gap-seconds` rather than guessed.
 
 ---
 
-## 6. What this does and does not establish
+## 6. Hardening the vendor calls before the key arrives
+
+The SAM 3.1 client was the one component no test touched. Fixtures proved the
+parser; nothing proved the request we build, the stream we read, or what
+happens when the far end misbehaves — and those are what fail on the morning
+of a demo.
+
+Both vendor integrations now run against stub servers that speak the
+documented protocol over a real socket, through the real OpenAI SDK. Four
+production defects surfaced while writing those tests.
+
+### A truncated stream was accepted as a complete one
+
+The worst defect in the project so far, and invisible without a fault
+injector. The client collected `response.output_text.delta` events until the
+iterator stopped. If the connection dropped halfway, the bytes already
+received were **valid** — records parse, base85 masks decode, events compile
+— and simply covered half the clip.
+
+Worse, it was then **written to the cache**, so the corruption became
+permanent and free to reproduce. Every number derived from it would be wrong,
+and nothing anywhere would report a problem.
+
+A response is now used only once the API has sent `response.completed`.
+Anything else raises, and nothing partial reaches the cache.
+
+### Retries did not exist, and then retried the wrong things
+
+A single 429 killed a run and discarded the work. The first fix retried
+everything, which is also wrong: a 400 means *we* sent something invalid, and
+repeating it spends the same money to receive the same error more slowly.
+
+Now: 429, 5xx, connection errors and dropped streams are retried with capped,
+jittered backoff, honouring `Retry-After`; 4xx is fatal. The jitter is not
+decoration — a clip issues one request per entity class, and synchronised
+retries would recreate the burst that caused the rate limit.
+
+Both clients share one implementation, because two would mean the untested
+one runs during the demo.
+
+### `--allow-spend` was unbounded
+
+The flag permitted spending without limiting it. A loop over clips, or one
+mis-sized video, could consume the whole grant with no stop. There is now a
+hard budget ceiling, checked before each request, which halts a run partway
+rather than after the money is gone.
+
+### "Truncated" was reported when the model chose the limit
+
+A model answering *"which zone had the longest dwell?"* writes `LIMIT 1` and
+receives exactly what it asked for. Reporting that as truncated made the
+brief warn about missing data nobody wanted. Truncation now means *we* cut
+the result short, not that a row cap existed.
+
+---
+
+## 7. What this does and does not establish
 
 **Does:** the pipeline runs end to end on real footage. Segmentation,
 re-identification, pixel-level zone occupancy, hysteresis, SQL compilation,

@@ -163,3 +163,20 @@ def test_nonexistent_column_is_a_clean_error_not_a_crash(db):
     with pytest.raises(GuardError) as err:
         run_readonly(db, "SELECT no_such_column FROM events")
     assert "rejected" in str(err.value).lower()
+
+
+def test_a_model_supplied_limit_is_not_reported_as_truncation(db):
+    """`LIMIT 1` for a superlative returns exactly what was asked for.
+
+    Reporting it as truncated made the brief warn about missing data that
+    nobody wanted.
+    """
+    result = run_readonly(db, "SELECT zone FROM events ORDER BY dwell_s DESC LIMIT 1")
+    assert len(result.rows) == 1
+    assert result.truncated is False
+
+
+def test_our_own_cap_is_still_reported_as_truncation(db):
+    result = run_readonly(db, "SELECT * FROM events", SqlGuard(max_limit=2))
+    assert len(result.rows) == 2
+    assert result.truncated is True

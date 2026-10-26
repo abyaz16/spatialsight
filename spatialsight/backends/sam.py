@@ -19,6 +19,8 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Sequence
 
@@ -43,6 +45,57 @@ MAX_TRACKED_OBJECTS = 16
 PRICE_PER_1K_FRAMES_USD = 0.20
 PRICE_PER_1K_IMAGES_USD = 2.50
 
+from .._retry import RetryPolicy, RetryableError, call_with_retries
+
+log = logging.getLogger("spatialsight.sam")
+
+
+class SamError(RuntimeError):
+    """Base class for failures of the segmentation call."""
+
+
+class IncompleteResponseError(SamError, RetryableError):
+    """The stream ended before the model said it was finished.
+
+    The most dangerous failure this client can hit, and the reason it has its
+    own type. A dropped connection leaves us holding bytes that are perfectly
+    valid and silently partial: the records parse, the masks decode, the
+    events compile, and the only symptom is that the second half of the clip
+    appears to contain nobody. Caching that would make the corruption
+    permanent and free to reproduce. So a response is used only when the API
+    has said `response.completed`.
+    """
+
+
+class RefusedError(SamError):
+    """The model declined the request. A successful HTTP call, not a crash."""
+
+
+class BudgetExceededError(SamError):
+    """The run would spend more than it was allowed to."""
+
+
+@dataclass
+class RunRecord:
+    """What a run actually did, for the cost line in the submission."""
+
+    requests_billed: int = 0
+    requests_served_from_cache: int = 0
+    retries: int = 0
+    frames: int = 0
+    est_usd: float = 0.0
+    concepts: list[str] = field(default_factory=list)
+
+    def as_dict(self) -> dict:
+        return {
+            "requests_billed": self.requests_billed,
+            "requests_served_from_cache": self.requests_served_from_cache,
+            "retries": self.retries,
+            "frames": self.frames,
+            "est_usd_this_run": round(self.est_usd, 4),
+            "concepts": list(self.concepts),
+        }
+
 
 class SamBackend:
     """Segments a local video file with SAM 3.1 via the Meta Model API."""
@@ -60,6 +113,9 @@ class SamBackend:
         mask_encoding: str = "one_bit",
         concept_for: dict[str, str] | None = None,
         allow_spend: bool = False,
+        budget_usd: float | None = 5.0,
+        timeout_s: float = 600.0,
+        retry: RetryPolicy | None = None,
     ) -> None:
         self.video_path = Path(video_path)
         if not self.video_path.exists():
@@ -76,8 +132,15 @@ class SamBackend:
             "person": "person",
             "vehicle": "forklift",
         }
+        # A hard ceiling on what one construction of this object may spend.
+        # `--allow-spend` says spending is permitted, not that it is
+        # unlimited; a loop over clips with no cap is how a grant evaporates.
+        self.budget_usd = budget_usd
+        self.timeout_s = timeout_s
+        self.retry = retry or RetryPolicy()
         self._meta: VideoMeta | None = None
         self._file_id: str | None = None
+        self.record = RunRecord()
         self.last_run: dict[str, object] = {}
 
     # ----- metadata -------------------------------------------------------
@@ -87,10 +150,24 @@ class SamBackend:
             self._meta = probe_video(self.video_path)
         return self._meta
 
-    def estimate_cost_usd(self) -> float:
+    def cost_per_request_usd(self) -> float:
         frames = max(MIN_BILLED_FRAMES, self.meta().frame_count)
-        per_request = frames / 1000.0 * PRICE_PER_1K_FRAMES_USD
-        return round(per_request * len(self.concept_for), 4)
+        return frames / 1000.0 * PRICE_PER_1K_FRAMES_USD
+
+    def estimate_cost_usd(self) -> float:
+        return round(self.cost_per_request_usd() * len(self.concept_for), 4)
+
+    def _check_budget(self, concept: str) -> None:
+        if self.budget_usd is None:
+            return
+        cost = self.cost_per_request_usd()
+        if self.record.est_usd + cost > self.budget_usd:
+            raise BudgetExceededError(
+                f"segmenting {concept!r} would bring this run to "
+                f"${self.record.est_usd + cost:.4f}, over the ${self.budget_usd:.2f} "
+                f"budget. Raise budget_usd, or resample the clip to fewer frames "
+                f"(`ss resample`)."
+            )
 
     # ----- the paid path --------------------------------------------------
 
@@ -104,7 +181,8 @@ class SamBackend:
             )
 
         detections: list[Detection] = []
-        spent_requests = 0
+        self.record = RunRecord(frames=meta.frame_count)
+
         for label in labels:
             concept = self.concept_for.get(label, label)
             key = CacheKey(
@@ -116,13 +194,16 @@ class SamBackend:
             deltas = self.cache.get(key)
             if deltas is None:
                 if not self.allow_spend:
-                    raise RuntimeError(
+                    raise SamError(
                         f"no cached response for concept {concept!r} on "
                         f"{self.video_path.name}, and spending is disabled. "
                         f"Re-run with --allow-spend (estimated "
                         f"${self.estimate_cost_usd():.2f} for this clip)."
                     )
-                deltas = asyncio.run(self._request(concept))
+                self._check_budget(concept)
+                deltas = self._request_with_retries(concept)
+                # Only a response the API confirmed complete reaches the
+                # cache; `_request` raises otherwise.
                 self.cache.put(
                     key,
                     deltas,
@@ -131,29 +212,34 @@ class SamBackend:
                         "frames": meta.frame_count,
                         "label": label,
                         "concept": concept,
-                        "est_usd": round(
-                            max(MIN_BILLED_FRAMES, meta.frame_count)
-                            / 1000.0
-                            * PRICE_PER_1K_FRAMES_USD,
-                            4,
-                        ),
+                        "est_usd": round(self.cost_per_request_usd(), 4),
                     },
                 )
-                spent_requests += 1
+                self.record.requests_billed += 1
+                self.record.est_usd += self.cost_per_request_usd()
+            else:
+                self.record.requests_served_from_cache += 1
+            self.record.concepts.append(concept)
             detections.extend(self._parse(deltas, label))
 
-        self.last_run = {
-            "requests_billed": spent_requests,
-            "cache": self.cache.stats(),
-            "est_usd_this_run": round(
-                spent_requests
-                * max(MIN_BILLED_FRAMES, meta.frame_count)
-                / 1000.0
-                * PRICE_PER_1K_FRAMES_USD,
-                4,
-            ),
-        }
+        self.last_run = {**self.record.as_dict(), "cache": self.cache.stats()}
         return detections
+
+    def _request_with_retries(self, concept: str) -> list[str]:
+        def note(exc: Exception, attempt: int, delay: float) -> None:
+            self.record.retries += 1
+            log.warning(
+                "segmenting %r failed (%s: %s); attempt %d of %d, retrying in %.1fs",
+                concept, type(exc).__name__, exc, attempt,
+                self.retry.max_attempts, delay,
+            )
+
+        return call_with_retries(
+            lambda: asyncio.run(self._request(concept)),
+            policy=self.retry,
+            on_retry=note,
+            what=f"segmenting {concept!r}",
+        )
 
     async def _upload(self, client) -> str:
         """Upload the clip once; SAM then references it by file id."""
@@ -166,10 +252,18 @@ class SamBackend:
     async def _request(self, concept: str) -> list[str]:
         from openai import AsyncOpenAI
 
-        client = AsyncOpenAI(base_url=self.api_base, api_key=self.api_key)
+        client = AsyncOpenAI(
+            base_url=self.api_base,
+            api_key=self.api_key,
+            timeout=self.timeout_s,
+            max_retries=0,  # retries are ours, so they can be counted and logged
+        )
         try:
             file_id = await self._upload(client)
             deltas: list[str] = []
+            completed = False
+            refusal: list[str] = []
+
             async with client.responses.stream(
                 model=self.model,
                 input=[
@@ -188,8 +282,30 @@ class SamBackend:
                 },
             ) as stream:
                 async for event in stream:
-                    if getattr(event, "type", "") == "response.output_text.delta":
+                    kind = getattr(event, "type", "")
+                    if kind == "response.output_text.delta":
                         deltas.append(event.delta)
+                    elif kind == "response.refusal.delta":
+                        refusal.append(getattr(event, "delta", ""))
+                    elif kind == "response.completed":
+                        completed = True
+                    elif kind in ("response.failed", "response.incomplete"):
+                        raise IncompleteResponseError(
+                            f"the API reported {kind} for concept {concept!r}"
+                        )
+
+            if refusal:
+                raise RefusedError(
+                    f"the model refused concept {concept!r}: {''.join(refusal).strip()}"
+                )
+            if not completed:
+                # Valid but partial bytes. Refusing them here is the whole
+                # point: accepted, they would be cached and silently wrong.
+                raise IncompleteResponseError(
+                    f"the stream for concept {concept!r} ended after "
+                    f"{len(deltas)} frame record(s) without response.completed; "
+                    f"treating it as truncated rather than caching a partial clip"
+                )
             return deltas
         finally:
             await client.close()

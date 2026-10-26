@@ -292,11 +292,33 @@ zones/              hand-drawn polygons per camera
 ./scripts/test
 ```
 
-125 tests, none of which need a key or a network. The pipeline is covered
-end to end through the **real** parse path: the simulated scene is encoded
-into genuine SAM wire format using the official parser's own mask encoder,
-written to the response cache, and read back through the official parser. The
-only thing a live key adds is the HTTP call itself.
+**221 tests, none of which need a key, a network or a GPU.**
+
+The pipeline is covered end to end through the **real** parse path: the
+simulated scene is encoded into genuine SAM wire format using the official
+parser's own mask encoder, written to the response cache, and read back
+through the official parser.
+
+### Vendor integrations are tested over real HTTP
+
+Fixtures prove the parser works and prove nothing about the integration. So
+both vendor calls run against stub servers that speak the documented
+protocol — a streaming `POST /v1/responses` plus the Files API for SAM 3.1,
+and chat completions for the text model. The production client talks to them
+through the real OpenAI SDK over a real socket. The only thing not exercised
+is Meta's own server.
+
+The failure cases carry most of the weight, because an integration tested
+only on the happy path is untested:
+
+| Case | What it protects |
+|---|---|
+| **Truncated stream** | The dangerous one. The bytes received are *valid*, just incomplete: records parse, masks decode, events compile, and the only symptom is that half the clip appears empty. A response is used only once the API says `response.completed`, and a partial one is never cached. |
+| **429 / 5xx** | Retried with capped, jittered backoff. Jitter matters because a clip issues one request per entity class, and synchronised retries recreate the burst that caused the limit. |
+| **400 / 401 / 404** | *Not* retried. A client error will not become a success by repetition; it just spends the same money three more times. |
+| **Refusal** | Arrives as HTTP 200 and must be reported as a refusal, not a crash. |
+| **No matches** | A documented normal result. A dock with no forklift yields zero rows, not an error. |
+| **Budget** | `--allow-spend` permits spending; it does not make it unlimited. A hard ceiling stops the run mid-clip rather than after the grant is gone. |
 
 ## Models used
 

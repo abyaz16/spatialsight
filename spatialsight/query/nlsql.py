@@ -17,11 +17,14 @@ feature demo; a wrong answer they cannot is a liability.
 from __future__ import annotations
 
 import json
+import logging
 from dataclasses import dataclass, field
 from pathlib import Path
 
 from ..db import SCHEMA_FOR_PROMPT
 from .guard import GuardError, QueryResult, SqlGuard, run_readonly
+
+log = logging.getLogger("spatialsight.nlsql")
 
 SQL_SYSTEM_PROMPT = """\
 You translate questions about video surveillance events into SQLite queries.
@@ -120,6 +123,8 @@ class SparkClient:
         *,
         api_style: str = "responses",
         require_key: bool = True,
+        timeout_s: float = 120.0,
+        retry=None,
     ) -> None:
         if require_key and not api_key:
             raise RuntimeError(
@@ -131,13 +136,48 @@ class SparkClient:
             raise ValueError(f"api_style must be 'responses' or 'chat', not {api_style!r}")
         from openai import OpenAI
 
+        from .._retry import RetryPolicy
+
         # A local server ignores the key, but the SDK insists on one.
-        self.client = OpenAI(base_url=api_base, api_key=api_key or "local", timeout=120)
+        self.client = OpenAI(
+            base_url=api_base,
+            api_key=api_key or "local",
+            timeout=timeout_s,
+            max_retries=0,  # ours, so they can be counted and logged
+        )
         self.model = model
         self.api_style = api_style
-        self.usage: dict[str, int] = {"input_tokens": 0, "output_tokens": 0, "calls": 0}
+        self.retry = retry or RetryPolicy(max_attempts=3, base_delay_s=0.5, max_delay_s=10.0)
+        self.usage: dict[str, int] = {
+            "input_tokens": 0,
+            "output_tokens": 0,
+            "calls": 0,
+            "retries": 0,
+        }
 
     def complete(self, system: str, user: str, *, max_output_tokens: int = 700) -> str:
+        """One completion, retrying only what is worth retrying.
+
+        A rate limit mid-demo should cost a second, not the answer. A bad
+        request should fail immediately rather than being sent three more
+        times to produce the same error.
+        """
+        from .._retry import call_with_retries
+
+        return call_with_retries(
+            lambda: self._complete_once(system, user, max_output_tokens),
+            policy=self.retry,
+            on_retry=self._note_retry,
+            what="completion",
+        )
+
+    def _note_retry(self, exc: Exception, attempt: int, delay: float) -> None:
+        self.usage["retries"] = self.usage.get("retries", 0) + 1
+        log.warning(
+            "%s on attempt %d; retrying in %.1fs", type(exc).__name__, attempt, delay
+        )
+
+    def _complete_once(self, system: str, user: str, max_output_tokens: int) -> str:
         if self.api_style == "chat":
             return self._complete_chat(system, user, max_output_tokens)
         response = self.client.responses.create(
