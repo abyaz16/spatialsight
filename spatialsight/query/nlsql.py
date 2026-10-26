@@ -42,6 +42,9 @@ Rules:
   and no date column. A question about "after 2pm" cannot be answered from
   this schema: return a query over the clip's own timeline instead, and do
   not invent a date column.
+- Because the times are seconds, a question about minutes needs the division:
+  CAST(entered_at / 60 AS INTEGER). Casting entered_at straight to an integer
+  gives seconds, not minutes.
 - Prefer returning frame_start alongside any row a user might want to seek
   to in the video.
 - When the question implies a ranking, include ORDER BY.

@@ -5,17 +5,26 @@ SQL returns are compared with the rows the hand-written SQL returns. Comparing
 *results* rather than SQL text is the point: there are many correct ways to
 write a query, and only one correct answer.
 
-Two levels are reported, because they mean different things to a user:
+Three levels are reported, because they mean different things to a user:
 
 * **exact** -- the same rows, ignoring row order and column names. The answer
   is right and shaped the way it was asked for.
 * **contains** -- every reference column can be found among the model's
-  columns with identical values. The answer is right but carries extra
-  columns, which a person reading the table would not mind.
+  columns with identical values. Right, with extra columns a reader would not
+  mind.
+* **subset** -- the model returned the *top* of the reference's ranking, with
+  a subset of its columns. "Which zone had the longest average dwell?" is
+  correctly answered by one row; the reference query returns all three,
+  ranked. Marking that wrong would understate the model badly, which is the
+  whole reason this distinction exists.
 
-Anything else is a miss, and the miss is kept with its SQL so it can be read.
-Numbers are compared after rounding to one decimal, since `AVG` written two
-ways can differ in the last float digit without being wrong.
+The subset check is deliberately a **prefix** check, not a sub-multiset one.
+A sub-multiset check would accept the *bottom* of a ranking as cheerfully as
+the top, and the bottom is the opposite answer.
+
+Anything else is a miss, kept with its SQL so it can be read. Numbers are
+compared after rounding to one decimal, since `AVG` written two ways can
+differ in the last float digit without being wrong.
 """
 
 from __future__ import annotations
@@ -43,36 +52,106 @@ def _norm(value):
     return value
 
 
-def _rows(rows) -> Counter:
-    return Counter(tuple(_norm(v) for v in row) for row in rows)
+def _norm_rows(rows) -> list[tuple]:
+    return [tuple(_norm(v) for v in row) for row in rows]
 
 
-def _columns(rows, width: int) -> list[Counter]:
-    return [Counter(_norm(row[i]) for row in rows) for i in range(width)]
+def _columns(rows: list[tuple], width: int) -> list[Counter]:
+    return [Counter(row[i] for row in rows) for i in range(width)]
 
 
-def compare(reference_rows, reference_cols, model_rows, model_cols) -> str:
-    """'exact', 'contains' or 'miss'."""
-    if _rows(reference_rows) == _rows(model_rows) and len(reference_cols) == len(model_cols):
-        return "exact"
-    if not reference_rows and not model_rows:
-        return "exact"
-    if len(reference_rows) != len(model_rows) or not model_cols:
-        return "miss"
-    # Can every reference column be matched to a distinct model column with the
-    # same multiset of values? Greedy is enough at these widths.
-    ref = _columns(reference_rows, len(reference_cols))
-    mod = _columns(model_rows, len(model_cols))
+def _embeds(wanted: list[Counter], available: list[Counter]) -> bool:
+    """Can every `wanted` column be matched to a distinct `available` one?"""
     used: set[int] = set()
-    for column in ref:
+    for column in wanted:
         match = next(
-            (j for j, candidate in enumerate(mod) if j not in used and candidate == column),
+            (j for j, candidate in enumerate(available) if j not in used and candidate == column),
             None,
         )
         if match is None:
-            return "miss"
+            return False
         used.add(match)
-    return "contains"
+    return True
+
+
+def _is_top_k(ref: list[tuple], ref_width: int, model: list[tuple], model_width: int) -> bool:
+    """Are the model's rows the reference's first k rows, with fewer columns?
+
+    Each model column must equal some reference column over those k rows, in
+    order, and no two model columns may claim the same reference column.
+    """
+    k = len(model)
+    head = ref[:k]
+    candidates = [
+        {j for j in range(ref_width) if [row[j] for row in head] == [row[i] for row in model]}
+        for i in range(model_width)
+    ]
+    if any(not c for c in candidates):
+        return False
+
+    def assign(i: int, used: frozenset[int]) -> bool:
+        if i == model_width:
+            return True
+        return any(assign(i + 1, used | {j}) for j in candidates[i] if j not in used)
+
+    return assign(0, frozenset())
+
+
+def _covers(ref: list[tuple], wanted: list[int], model: list[tuple], model_width: int) -> bool:
+    """Does the model's top-k carry every required reference column?"""
+    head = ref[: len(model)]
+    candidates = [
+        {i for i in range(model_width) if [row[i] for row in model] == [row[j] for row in head]}
+        for j in wanted
+    ]
+    if any(not c for c in candidates):
+        return False
+
+    def assign(n: int, used: frozenset[int]) -> bool:
+        if n == len(candidates):
+            return True
+        return any(assign(n + 1, used | {i}) for i in candidates[n] if i not in used)
+
+    return assign(0, frozenset())
+
+
+def compare(reference_rows, reference_cols, model_rows, model_cols, required=()) -> str:
+    """'exact', 'contains', 'subset', 'covers' or 'miss'."""
+    ref = _norm_rows(reference_rows)
+    model = _norm_rows(model_rows)
+    ref_width, model_width = len(reference_cols), len(model_cols)
+
+    if not ref and not model:
+        return "exact"
+    if not model or not model_width:
+        return "miss"
+
+    if ref_width == model_width and Counter(ref) == Counter(model):
+        return "exact"
+
+    if model_width > ref_width and len(model) == len(ref):
+        if _embeds(_columns(ref, ref_width), _columns(model, model_width)):
+            return "contains"
+
+    # Required columns gate every remaining verdict. Without this, a model
+    # that answers "the five longest dwells, with the frame to seek to" using
+    # only entity_id and zone is a strict subset of the reference and would
+    # pass, having returned neither the dwell nor the frame.
+    wanted = [reference_cols.index(c) for c in required if c in reference_cols]
+    has_required = (
+        len(wanted) == len(required) and _covers(ref, wanted, model, model_width)
+        if required
+        else True
+    )
+
+    if has_required and len(model) <= len(ref):
+        if model_width <= ref_width and _is_top_k(ref, ref_width, model, model_width):
+            return "subset"
+        # A different projection, carrying everything the question asked for.
+        if required:
+            return "covers"
+
+    return "miss"
 
 
 @dataclass
@@ -102,15 +181,28 @@ class BenchReport:
         return sum(1 for i in self.items if i.verdict == "contains")
 
     @property
+    def subset(self) -> int:
+        return sum(1 for i in self.items if i.verdict == "subset")
+
+    @property
+    def covers(self) -> int:
+        return sum(1 for i in self.items if i.verdict == "covers")
+
+    @property
     def answered(self) -> int:
-        return self.exact + self.contains
+        return self.exact + self.contains + self.subset + self.covers
 
     def lines(self) -> list[str]:
         out = [f"NL->SQL benchmark: {self.model} via {self.endpoint}", ""]
         for item in self.items:
-            mark = {"exact": "PASS ", "contains": "PASS+", "miss": "MISS ", "error": "FAIL "}[
-                item.verdict
-            ]
+            mark = {
+                "exact": "PASS ",
+                "contains": "PASS+",
+                "subset": "PASS-",
+                "covers": "PASS~",
+                "miss": "MISS ",
+                "error": "FAIL ",
+            }[item.verdict]
             retry = " (retried)" if item.attempts > 1 else ""
             out.append(f"  {mark} {item.key:<28} {item.seconds:5.1f}s{retry}")
             if item.verdict in ("miss", "error"):
@@ -124,6 +216,8 @@ class BenchReport:
             "",
             f"  exact     {self.exact}/{n}",
             f"  contains  {self.contains}/{n}   (right rows, extra columns)",
+            f"  subset    {self.subset}/{n}   (top of the ranking, fewer columns)",
+            f"  covers    {self.covers}/{n}   (different columns, all required ones present)",
             f"  answered  {self.answered}/{n}",
         ]
         if self.usage:
@@ -136,6 +230,8 @@ class BenchReport:
             "endpoint": self.endpoint,
             "exact": self.exact,
             "contains": self.contains,
+            "subset": self.subset,
+            "covers": self.covers,
             "answered": self.answered,
             "total": len(self.items),
             "usage": self.usage,
@@ -180,7 +276,11 @@ def run_bench(
             )
             continue
         verdict = compare(
-            reference.rows, reference.columns, answer.result.rows, answer.result.columns
+            reference.rows,
+            reference.columns,
+            answer.result.rows,
+            answer.result.columns,
+            required=q.must_have,
         )
         report.items.append(
             BenchItem(

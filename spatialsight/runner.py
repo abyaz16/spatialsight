@@ -28,6 +28,7 @@ class RunReport:
     entities: int
     stitches: int
     splits: int
+    dropped: int
     events: int
     zones: tuple[str, ...]
     zone_pixels: dict[str, int] = field(default_factory=dict)
@@ -39,7 +40,8 @@ class RunReport:
             f"{self.meta.frame_count} frames, {self.meta.duration_s:.1f}s",
             f"detections    {self.detections} across {self.raw_object_ids} raw object ids",
             f"entities      {self.entities}  "
-            f"(+{self.stitches} stitched, +{self.splits} split)",
+            f"(+{self.stitches} stitched, +{self.splits} split, "
+            f"-{self.dropped} dropped as noise)",
             f"zones         {', '.join(self.zones)}",
             f"events        {self.events}",
         ]
@@ -92,6 +94,7 @@ def run(
         entities=len(recon.tracks),
         stitches=recon.stitches,
         splits=recon.splits,
+        dropped=recon.dropped,
         events=len(events),
         zones=zone_set.names,
         zone_pixels=dict(raster.areas),

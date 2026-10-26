@@ -219,7 +219,9 @@ def cmd_ingest(args) -> int:
         clip=args.clip,
         zones_path=zones_path,
         db_path=cfg.db_path,
-        tracker_params=TrackerParams(max_gap_frames=args.max_gap),
+        tracker_params=TrackerParams(
+            max_gap_frames=args.max_gap, min_detections=args.min_detections
+        ),
         event_params=EventParams(enter_at=args.enter_at, exit_at=args.exit_at),
     )
     print("\n".join(report.lines()))
@@ -469,6 +471,12 @@ def build_parser() -> argparse.ArgumentParser:
     ing.add_argument("--zones", default=None)
     ing.add_argument("--allow-spend", action="store_true", help="permit paid API calls")
     ing.add_argument("--max-gap", type=int, default=12)
+    ing.add_argument(
+        "--min-detections",
+        type=int,
+        default=3,
+        help="frames an entity must be seen in before it counts (noise filter)",
+    )
     ing.add_argument("--enter-at", type=float, default=0.50)
     ing.add_argument("--exit-at", type=float, default=0.30)
     ing.add_argument("-v", "--verbose", action="store_true")
@@ -524,6 +532,14 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> int:
     # Keep numpy single-threaded: OpenBLAS aborts on this machine otherwise.
     os.environ.setdefault("OPENBLAS_NUM_THREADS", "1")
+    # Model output contains characters a Windows console code page cannot
+    # print (a narrow no-break space killed the first live brief). Replace
+    # rather than crash: a mangled glyph is better than a lost answer.
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(encoding="utf-8", errors="replace")
+        except (AttributeError, ValueError):
+            pass
     args = build_parser().parse_args(argv)
     try:
         return args.func(args)

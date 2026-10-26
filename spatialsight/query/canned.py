@@ -28,6 +28,20 @@ class CannedQuestion:
     question: str
     sql: str
     note: str = ""
+    must_have: tuple[str, ...] = ()
+    """Reference columns any correct answer has to carry.
+
+    The rule is what the question's own words demand, applied uniformly:
+    a "which zone" superlative demands the zone, "how many" demands the
+    count, "with the frame to seek to" demands the frame. Supporting
+    detail the reference happens to select is not required.
+
+    Stated per question rather than inferred from `sql`, because otherwise
+    the benchmark's definition of "correct" is whatever columns the reference
+    query happens to select. A model that answers "the five longest dwells,
+    with the frame to seek to" with exactly those two columns is right, and a
+    benchmark that calls it wrong is measuring the reference, not the model.
+    """
 
 
 QUESTIONS: tuple[CannedQuestion, ...] = (
@@ -40,6 +54,7 @@ FROM entities
 GROUP BY class
 ORDER BY entities DESC
 """,
+            must_have=('class', 'entities'),
     ),
     CannedQuestion(
         key="longest_average_dwell",
@@ -52,6 +67,7 @@ FROM events
 GROUP BY zone
 ORDER BY avg_dwell_s DESC
 """,
+            must_have=('zone',),
     ),
     CannedQuestion(
         key="busiest_zone",
@@ -62,6 +78,7 @@ FROM events
 GROUP BY zone
 ORDER BY visits DESC
 """,
+            must_have=('zone',),
     ),
     CannedQuestion(
         key="longest_dwells",
@@ -72,6 +89,7 @@ FROM events
 ORDER BY dwell_s DESC
 LIMIT 5
 """,
+            must_have=('dwell_s', 'frame_start'),
     ),
     CannedQuestion(
         key="time_per_entity_in_dock",
@@ -85,6 +103,7 @@ WHERE zone = 'loading_dock'
 GROUP BY entity_id, class
 ORDER BY total_dwell_s DESC
 """,
+            must_have=('entity_id',),
     ),
     CannedQuestion(
         key="multi_zone_entities",
@@ -98,6 +117,7 @@ GROUP BY entity_id, class
 HAVING COUNT(DISTINCT zone) > 1
 ORDER BY zones_visited DESC
 """,
+            must_have=('entity_id',),
     ),
     CannedQuestion(
         key="concurrent_dock_occupancy",
@@ -124,6 +144,7 @@ WHERE p.zone = 'loading_dock'
 ORDER BY overlap_s DESC
 """,
         note="Interval-overlap self-join. Models usually get the inequality backwards.",
+            must_have=('person_id', 'vehicle_id'),
     ),
     CannedQuestion(
         key="median_dwell",
@@ -142,6 +163,7 @@ GROUP BY zone
 ORDER BY median_dwell_s DESC
 """,
         note="SQLite has no median; this is the window-function construction.",
+            must_have=('zone', 'median_dwell_s'),
     ),
     CannedQuestion(
         key="open_at_clip_end",
@@ -152,6 +174,7 @@ FROM events
 WHERE closed = 0
 ORDER BY dwell_s DESC
 """,
+            must_have=('entity_id', 'zone'),
     ),
     CannedQuestion(
         key="entries_per_minute",
@@ -164,6 +187,7 @@ FROM events
 GROUP BY minute
 ORDER BY minute
 """,
+            must_have=('minute', 'entries'),
     ),
 )
 

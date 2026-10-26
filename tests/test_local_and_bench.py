@@ -80,9 +80,94 @@ def test_wrong_values_are_a_miss():
     assert compare([("dock", 43.0)], ["z", "v"], [("dock", 12.0)], ["z", "v"]) == "miss"
 
 
-def test_wrong_row_count_is_a_miss():
-    ref = [("a", 1.0), ("b", 2.0)]
-    assert compare(ref, ["x", "y"], ref[:1], ["x", "y"]) == "miss"
+# ----- subset: the top of a ranking, or fewer columns -----------------------
+
+
+def test_top_one_of_a_ranking_is_a_subset_not_a_miss():
+    # "Which zone had the longest average dwell?" answered with one row,
+    # against a reference that returns the whole ranking.
+    ref = [("dock", 43.0, 2), ("aisle", 30.0, 2), ("bench", 14.5, 2)]
+    model = [("dock", 43.0)]
+    assert compare(ref, ["zone", "avg", "visits"], model, ["zone", "avg"]) == "subset"
+
+
+def test_bottom_of_a_ranking_is_still_a_miss():
+    # The trap a sub-multiset check would fall into: the least-dwelt zone is
+    # the opposite answer to the most-dwelt one, and must never score.
+    ref = [("dock", 43.0, 2), ("aisle", 30.0, 2), ("bench", 14.5, 2)]
+    assert compare(ref, ["zone", "avg", "visits"], [("bench", 14.5)], ["zone", "avg"]) == "miss"
+
+
+def test_fewer_columns_over_all_rows_is_a_subset():
+    ref = [(51.5, 0, "dock"), (34.5, 170, "dock")]
+    model = [(51.5, 0), (34.5, 170)]
+    assert compare(ref, ["d", "f", "z"], model, ["dwell_s", "frame_start"]) == "subset"
+
+
+def test_a_subset_must_keep_the_reference_order():
+    ref = [("a", 1.0), ("b", 2.0), ("c", 3.0)]
+    assert compare(ref, ["x", "y"], [("b", 2.0)], ["x", "y"]) == "miss"
+
+
+def test_two_model_columns_cannot_claim_one_reference_column():
+    ref = [("dock", 43.0, 2)]
+    # Both model columns hold the same values; only one reference column does.
+    model = [(43.0, 43.0)]
+    assert compare(ref, ["z", "avg", "n"], model, ["a", "b"]) == "miss"
+
+
+def test_more_rows_than_the_reference_is_a_miss():
+    ref = [("a", 1.0)]
+    assert compare(ref, ["x", "y"], [("a", 1.0), ("b", 2.0)], ["x", "y"]) == "miss"
+
+
+def test_an_empty_model_result_against_real_rows_is_a_miss():
+    assert compare([("a", 1.0)], ["x", "y"], [], ["x", "y"]) == "miss"
+
+
+# ----- covers: a different projection that still answers the question -------
+
+
+def test_a_different_projection_carrying_the_required_columns_covers():
+    # The real case: the model swapped `entered_at` for `clip`, so its columns
+    # are neither a subset nor a superset of the reference's -- but it has the
+    # dwell and the frame to seek to, which is what the question asked for.
+    ref = [(2, "vehicle", "dock", 51.5, 0, 0.0), (5, "person", "dock", 34.5, 170, 85.0)]
+    ref_cols = ["entity_id", "class", "zone", "dwell_s", "frame_start", "entered_at"]
+    model = [("c1", 2, "vehicle", "dock", 51.5, 0), ("c1", 5, "person", "dock", 34.5, 170)]
+    model_cols = ["clip", "entity_id", "class", "zone", "dwell_s", "frame_start"]
+    assert compare(ref, ref_cols, model, model_cols) == "miss", "no requirement, no pass"
+    assert (
+        compare(ref, ref_cols, model, model_cols, required=("dwell_s", "frame_start"))
+        == "covers"
+    )
+
+
+def test_covers_still_refuses_a_missing_required_column():
+    ref = [(2, "dock", 51.5, 0)]
+    ref_cols = ["entity_id", "zone", "dwell_s", "frame_start"]
+    model = [(2, "dock")]  # no dwell, no frame
+    assert (
+        compare(ref, ref_cols, model, ["entity_id", "zone"], required=("dwell_s", "frame_start"))
+        == "miss"
+    )
+
+
+def test_covers_still_refuses_the_bottom_of_a_ranking():
+    ref = [("dock", 43.0, 2), ("bench", 14.5, 2)]
+    ref_cols = ["zone", "avg_dwell_s", "visits"]
+    model = [("x", "bench", 14.5)]
+    assert compare(ref, ref_cols, model, ["clip", "zone", "avg"], required=("zone", "avg_dwell_s")) == "miss"
+
+
+def test_every_question_declares_required_columns_that_its_sql_returns():
+    from spatialsight.query.guard import run_readonly
+
+    for q in QUESTIONS:
+        assert q.must_have, f"{q.key} declares no required columns"
+        columns = run_readonly("data/db/spatialsight.sqlite", q.sql).columns
+        missing = [c for c in q.must_have if c not in columns]
+        assert not missing, f"{q.key} requires {missing}, which its own SQL does not return"
 
 
 def test_group_concat_order_is_ignored():

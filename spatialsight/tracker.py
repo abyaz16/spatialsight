@@ -44,6 +44,17 @@ class TrackerParams:
     split_min_jump: float = 3.0
     """Centroid jump, in box diagonals, that marks an ID switch."""
 
+    min_detections: int = 3
+    """Frames an entity must be seen in before it counts as an entity.
+
+    A detector run over real footage emits brief false positives -- a shadow,
+    a bag, half a reflection -- that live for a frame or two. Each one
+    otherwise becomes an entity with its own row, and on a real clip that
+    inflated the count from roughly 35 to 58 while contributing 94 of 5,771
+    detections. Three sightings with consistent geometry is the least that
+    distinguishes an object from noise; raise it for a noisier detector.
+    """
+
 
 @dataclass
 class Repair:
@@ -63,6 +74,10 @@ class Reconciliation:
     @property
     def splits(self) -> int:
         return sum(1 for r in self.repairs if r.kind == "split")
+
+    @property
+    def dropped(self) -> int:
+        return sum(1 for r in self.repairs if r.kind == "dropped")
 
 
 def _diag(box: Box) -> float:
@@ -200,6 +215,16 @@ def reconcile(
     tracks: list[Track] = []
     for entity_id, chain in enumerate(chains, start=1):
         dets = sorted((d for _, part in chain for d in part), key=lambda d: d.frame)
+        if len(dets) < params.min_detections:
+            repairs.append(
+                Repair(
+                    "dropped",
+                    f"object {sorted({oid for oid, _ in chain})} seen in only "
+                    f"{len(dets)} frame(s), below the {params.min_detections}-frame "
+                    f"minimum",
+                )
+            )
+            continue
         tracks.append(
             Track(
                 entity_id=entity_id,
