@@ -1,0 +1,7 @@
+#!/usr/bin/env bash
+set -euo pipefail
+cd "$(dirname "$0")/.."
+export PYTHONPATH=""
+export OPENBLAS_NUM_THREADS="${OPENBLAS_NUM_THREADS:-1}"
+[ -f .env ] && set -a && . ./.env && set +a
+exec ./.venv/Scripts/python.exe -m spatialsight.server "$@"

@@ -1,0 +1,18 @@
+{
+  "camera": "synthetic-01",
+  "frame": { "width": 1280, "height": 720 },
+  "zones": [
+    {
+      "name": "loading_dock",
+      "polygon": [[80, 60], [520, 60], [520, 380], [80, 380]]
+    },
+    {
+      "name": "packing_bench",
+      "polygon": [[520, 400], [900, 400], [900, 540], [520, 540]]
+    },
+    {
+      "name": "pick_aisle",
+      "polygon": [[200, 540], [1100, 540], [1100, 700], [200, 700]]
+    }
+  ]
+}

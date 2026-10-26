@@ -1,0 +1,6 @@
+# SpatialSight pipeline
+meta-sam-parser==0.1.0   # official SAM 3.1 output parser (zero-dep)
+openai==3.37.0           # Meta Model API is OpenAI-SDK compatible
+shapely==2.2.0           # zone polygon geometry
+numpy==2.4.6             # mask rasters
+pytest==9.0.2

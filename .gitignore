@@ -1,0 +1,14 @@
+.venv/
+__pycache__/
+*.pyc
+.env
+data/clips/*
+data/cache/*
+data/db/*
+!data/**/.gitkeep
+node_modules/
+web/.next/
+web/out/
+.pytest_cache/
+*.sqlite
+*.sqlite-journal

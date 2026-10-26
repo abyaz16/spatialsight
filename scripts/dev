@@ -1,0 +1,22 @@
+#!/usr/bin/env bash
+# Run the API and the UI together. Ctrl-C stops both.
+set -euo pipefail
+cd "$(dirname "$0")/.."
+
+export PYTHONPATH=""
+export OPENBLAS_NUM_THREADS="${OPENBLAS_NUM_THREADS:-1}"
+[ -f .env ] && set -a && . ./.env && set +a
+
+if [ ! -f data/db/spatialsight.sqlite ]; then
+  echo "no database yet -- building the offline fixture clip"
+  ./scripts/ss fixture
+  ./scripts/ss ingest synthetic-01
+fi
+
+./.venv/Scripts/python.exe -m spatialsight.server --port 8000 &
+API_PID=$!
+trap 'kill $API_PID 2>/dev/null || true' EXIT INT TERM
+
+cd web
+[ -d node_modules ] || npm install --no-audit --no-fund
+npm run dev
