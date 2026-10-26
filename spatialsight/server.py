@@ -264,8 +264,15 @@ class Api:
 
     def ask(self, question: str) -> dict:
         from .query.nlsql import ask as ask_spark
+        from .query.qcache import default_cache
 
-        answer = ask_spark(question, self.cfg.db_path, self.spark(), guard=self.guard)
+        answer = ask_spark(
+            question,
+            self.cfg.db_path,
+            self.spark(),
+            guard=self.guard,
+            cache=default_cache(self.cfg.db_path),
+        )
         payload: dict = {
             "question": answer.question,
             "sql": answer.sql,

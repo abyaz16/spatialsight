@@ -61,7 +61,7 @@ def test_the_prompt_pins_the_schema_and_the_vocabulary(db):
     client = StubClient("SELECT zone FROM events")
     ask("anything", db, client, with_brief=False)
     system, _ = client.calls[0]
-    assert "CREATE TABLE events" in system
+    assert "events(" in system and "entities(" in system
     assert "loading_dock" in system
     for zone in context["zones"]:
         assert zone in system
@@ -106,7 +106,11 @@ def test_the_brief_is_written_over_the_rows(db):
     assert brief_system == BRIEF_SYSTEM_PROMPT
     # The brief must be given the actual rows, not just the question.
     assert "loading_dock" in brief_user
-    assert "sql" in brief_user
+    # Rows go as a table, not indented JSON: one header line, then values.
+    assert brief_user.splitlines()[-4] == "zone\tn"
+    # And it must be told whether what it is looking at is the whole answer,
+    # or it hedges about a complete result being too small.
+    assert "complete: true" in brief_user
 
 
 # ----- the retry ------------------------------------------------------------
@@ -168,3 +172,71 @@ def test_system_prompt_template_has_every_placeholder_filled(db):
     assert "{classes}" not in system
     assert "{clips}" not in system
     assert SQL_SYSTEM_PROMPT.count("{") == 4
+
+
+# ----- the brief, where it needs no model -----------------------------------
+
+
+def test_an_empty_result_needs_no_model_call(db):
+    """A model handed zero rows invents a reason for them.
+
+    There is exactly one true thing to say about an empty result, so it is
+    said locally: correct by construction, and free.
+    """
+    client = StubClient("SELECT zone FROM events WHERE zone = 'nowhere'")
+    answer = ask("who was in nowhere?", db, client)
+    assert answer.ok
+    assert answer.result is not None and not answer.result.rows
+    assert answer.brief == "No rows matched."
+    assert client.usage["calls"] == 1, "no brief call for an empty result"
+
+
+def test_the_brief_is_told_when_a_result_was_cut_short(db):
+    from spatialsight.query.guard import SqlGuard
+
+    client = StubClient("SELECT zone FROM events", "A brief.")
+    ask("every zone visit", db, client, guard=SqlGuard(max_limit=2))
+    _, brief_user = client.calls[1]
+    assert "complete: false" in brief_user
+
+
+def test_only_the_first_rows_go_to_the_brief(db):
+    from spatialsight.query.nlsql import BRIEF_MAX_ROWS
+
+    client = StubClient("SELECT zone, dwell_s FROM events", "A brief.")
+    answer = ask("all visits", db, client)
+    _, brief_user = client.calls[1]
+    body = brief_user.split("\n\n")[-1].splitlines()
+    assert len(body) - 1 <= BRIEF_MAX_ROWS  # minus the header line
+    assert f"rows: {len(answer.result.rows)}" in brief_user
+
+
+# ----- the rules that exist because the model got them wrong ----------------
+
+
+def test_the_prompt_rules_out_a_fake_median(db):
+    client = StubClient("SELECT zone FROM events")
+    ask("median dwell per zone", db, client, with_brief=False)
+    system, _ = client.calls[0]
+    assert "AVG is not one" in system
+    assert "ROW_NUMBER() OVER" in system
+
+
+def test_the_prompt_requires_a_self_join_to_exclude_itself(db):
+    client = StubClient("SELECT zone FROM events")
+    ask("who else was there when it left?", db, client, with_brief=False)
+    system, _ = client.calls[0]
+    assert "a.entity_id <> b.entity_id" in system and "exited_at, not" in system
+
+
+def test_situational_rules_are_sent_only_when_the_question_needs_them(db):
+    plain = StubClient("SELECT zone FROM events")
+    ask("how many people were tracked?", db, plain, with_brief=False)
+    assert "AVG is not one" not in plain.calls[0][0]
+    assert "a.entity_id <> b.entity_id" not in plain.calls[0][0]
+
+    rich = StubClient("SELECT zone FROM events")
+    ask("median dwell per zone, and who else was there?", db, rich, with_brief=False)
+    assert "AVG is not one" in rich.calls[0][0]
+    assert "a.entity_id <> b.entity_id" in rich.calls[0][0]
+    assert len(rich.calls[0][0]) > len(plain.calls[0][0])

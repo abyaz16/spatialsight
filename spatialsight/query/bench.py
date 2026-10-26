@@ -39,11 +39,23 @@ from .guard import GuardError, SqlGuard, run_readonly
 from .nlsql import SparkClient, ask
 
 
+def _round1(value: float) -> float:
+    """Round half up, as SQLite's ROUND does, not half to even as Python does.
+
+    `round(3.25, 1)` is 3.2 in Python and 3.3 in SQLite. A reference that
+    rounds in SQL and a model that does not then disagree on a correct
+    answer, and the exact median was being graded a miss for it.
+    """
+    from decimal import ROUND_HALF_UP, Decimal
+
+    return float(Decimal(str(value)).quantize(Decimal("0.1"), rounding=ROUND_HALF_UP))
+
+
 def _norm(value):
     if isinstance(value, float):
-        return round(value, 1)
+        return _round1(value)
     if isinstance(value, int):
-        return round(float(value), 1)
+        return float(value)
     if isinstance(value, str):
         # GROUP_CONCAT order is unspecified; compare the set it names.
         if "," in value:

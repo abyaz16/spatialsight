@@ -25,6 +25,9 @@ CREATE TABLE IF NOT EXISTS entities (
   last_seen   REAL    NOT NULL,
   frame_first INTEGER NOT NULL,
   frame_last  INTEGER NOT NULL,
+  colour      TEXT,               -- NULL when the pixels could not be read
+  colour_hex  TEXT,               -- the evidence the name was judged from
+  colour_stability REAL,          -- 1.0 = every sampled frame agreed
   PRIMARY KEY (clip, entity_id)
 );
 
@@ -50,33 +53,23 @@ CREATE INDEX IF NOT EXISTS idx_events_clip  ON events (clip);
 """
 
 SCHEMA_FOR_PROMPT = """\
-CREATE TABLE entities (
-  entity_id   INTEGER,  -- unique within a clip
-  clip        TEXT,     -- clip name, e.g. 'warehouse-01'
-  class        TEXT,    -- 'person' or 'vehicle'
-  first_seen  REAL,     -- seconds from the start of the clip
-  last_seen   REAL,
-  frame_first INTEGER,
-  frame_last  INTEGER
-);
+entities(entity_id INT, clip TEXT, class TEXT, first_seen REAL, last_seen REAL,
+         frame_first INT, frame_last INT, colour TEXT, colour_hex TEXT,
+         colour_stability REAL)
+events(id INT, clip TEXT, entity_id INT, class TEXT, zone TEXT, entered_at REAL,
+       exited_at REAL, dwell_s REAL, frame_start INT, frame_end INT,
+       peak_overlap REAL, closed INT)
 
-CREATE TABLE events (
-  id           INTEGER,
-  clip         TEXT,
-  entity_id    INTEGER,  -- joins to entities(entity_id) within the same clip
-  class        TEXT,
-  zone         TEXT,     -- zone name, e.g. 'loading_dock'
-  entered_at   REAL,     -- seconds from the start of the clip
-  exited_at    REAL,
-  dwell_s      REAL,     -- exited_at - entered_at
-  frame_start  INTEGER,
-  frame_end    INTEGER,
-  peak_overlap REAL,     -- 0..1, the most of the entity ever inside the zone
-  closed       INTEGER   -- 0 when the entity was still in the zone at clip end
-);
-
--- Times are seconds into the clip, not wall-clock. One row in `events`
--- is one visit by one entity to one zone.\
+One events row = one visit by one entity to one zone. All times are seconds
+from the start of the clip; there is no date or wall-clock column.
+dwell_s = exited_at - entered_at. peak_overlap is 0..1, the most of the
+entity ever inside the zone. closed=0 means still inside at clip end.
+colour is one of: red orange yellow green cyan blue purple pink white grey
+black -- read from the entity's own pixels, approximate, and NULL where the
+clip's pixels were unavailable. colour_stability is 0..1: how many of the
+entity's sampled frames agreed on that colour. Below about 0.75 the entity
+changed colour during its life, which means its identity is suspect -- use it
+to answer questions about unreliable or possibly-confused tracks.\
 """
 
 
@@ -91,8 +84,36 @@ def connect(path: str | Path, *, read_only: bool = False) -> sqlite3.Connection:
         path.parent.mkdir(parents=True, exist_ok=True)
         con = sqlite3.connect(path)
         con.executescript(SCHEMA)
+        _migrate(con)
     con.row_factory = sqlite3.Row
     return con
+
+
+# Columns added after the first release, as (table, column, declaration).
+# `CREATE TABLE IF NOT EXISTS` is a no-op on a database that already has the
+# table, so a new column never appears in one someone already ingested into.
+# Re-ingesting would rebuild it, but silently losing a stranger's clips to a
+# schema bump is not an acceptable upgrade path.
+MIGRATIONS: tuple[tuple[str, str, str], ...] = (
+    ("entities", "colour", "TEXT"),
+    ("entities", "colour_hex", "TEXT"),
+    ("entities", "colour_stability", "REAL"),
+)
+
+
+def _migrate(con: sqlite3.Connection) -> list[str]:
+    """Add any missing columns. Returns what it added, for the tests."""
+    added: list[str] = []
+    for table, column, decl in MIGRATIONS:
+        existing = {r[1] for r in con.execute(f"PRAGMA table_info({table})")}
+        if not existing:
+            continue  # table absent entirely; SCHEMA will have made it
+        if column not in existing:
+            con.execute(f"ALTER TABLE {table} ADD COLUMN {column} {decl}")
+            added.append(f"{table}.{column}")
+    if added:
+        con.commit()
+    return added
 
 
 def write_clip(
@@ -101,14 +122,17 @@ def write_clip(
     meta: VideoMeta,
     tracks: list[Track],
     events: list[ZoneEvent],
+    appearances: dict | None = None,
 ) -> None:
     """Replace everything stored for `clip`. Re-running the pipeline is idempotent."""
+    appearances = appearances or {}
     with con:
         con.execute("DELETE FROM events WHERE clip = ?", (clip,))
         con.execute("DELETE FROM entities WHERE clip = ?", (clip,))
         con.executemany(
             "INSERT INTO entities (entity_id, clip, class, first_seen, last_seen,"
-            " frame_first, frame_last) VALUES (?,?,?,?,?,?,?)",
+            " frame_first, frame_last, colour, colour_hex, colour_stability)"
+            " VALUES (?,?,?,?,?,?,?,?,?,?)",
             [
                 (
                     t.entity_id,
@@ -118,6 +142,9 @@ def write_clip(
                     round(meta.to_seconds(t.last_frame), 3),
                     t.first_frame,
                     t.last_frame,
+                    look.colour if (look := appearances.get(t.entity_id)) else None,
+                    look.hex if look else None,
+                    look.stability if look else None,
                 )
                 for t in tracks
             ],

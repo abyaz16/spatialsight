@@ -178,7 +178,10 @@ ORDER BY dwell_s DESC
     ),
     CannedQuestion(
         key="entries_per_minute",
-        question="How many zone entries happened in each minute of the clip?",
+        # "each minute of the clip" read as per-clip once a second clip was
+        # ingested, and the model split the rows by clip about half the time.
+        # The question, not the grader, was the ambiguous part.
+        question="How many zone entries happened in each minute, across all clips?",
         sql="""
 SELECT CAST(entered_at / 60 AS INTEGER) AS minute,
        COUNT(*) AS entries,

@@ -90,3 +90,109 @@ def test_the_vehicle_is_found_in_the_loading_dock(tmp_path):
     dock = [e for e in events if e.zone == "loading_dock" and e.label == "vehicle"]
     assert dock, "the scripted forklift dwell must appear as an event"
     assert max(e.dwell_s for e in dock) > 20.0
+
+
+# ----- the schema migration -------------------------------------------------
+
+
+def test_a_database_from_before_the_colour_columns_is_upgraded(tmp_path):
+    """`CREATE TABLE IF NOT EXISTS` does nothing to an existing table.
+
+    Without the migration, a new column never appears in a database someone
+    has already ingested into, and the first query for it fails with 'no such
+    column' on data that looks perfectly fine.
+    """
+    import sqlite3
+
+    from spatialsight.db import connect
+
+    path = tmp_path / "old.sqlite"
+    con = sqlite3.connect(path)
+    con.executescript(
+        "CREATE TABLE entities (entity_id INTEGER NOT NULL, clip TEXT NOT NULL,"
+        " class TEXT NOT NULL, first_seen REAL NOT NULL, last_seen REAL NOT NULL,"
+        " frame_first INTEGER NOT NULL, frame_last INTEGER NOT NULL,"
+        " PRIMARY KEY (clip, entity_id));"
+        "INSERT INTO entities VALUES (1,'old-clip','person',0.0,1.0,0,2);"
+    )
+    con.commit()
+    con.close()
+
+    upgraded = connect(path)
+    try:
+        columns = {r[1] for r in upgraded.execute("PRAGMA table_info(entities)")}
+        assert {"colour", "colour_hex", "colour_stability"} <= columns
+        # And the rows that were already there survived it.
+        assert upgraded.execute("SELECT COUNT(*) FROM entities").fetchone()[0] == 1
+    finally:
+        upgraded.close()
+
+
+def test_migrating_twice_is_a_no_op(tmp_path):
+    from spatialsight.db import _migrate, connect
+
+    path = tmp_path / "m.sqlite"
+    con = connect(path)
+    try:
+        assert _migrate(con) == []
+    finally:
+        con.close()
+
+
+def test_colour_is_written_for_a_clip_with_pixels(tmp_path):
+    """End to end: painted actors in, colour column out."""
+    import sqlite3
+
+    from spatialsight.backends.synthetic import SyntheticBackend
+    from spatialsight.runner import run
+
+    path = tmp_path / "c.sqlite"
+    report, _, _ = run(
+        backend=SyntheticBackend("synthetic-01"),
+        clip="synthetic-01",
+        zones_path="zones/synthetic-01.json",
+        db_path=path,
+    )
+    assert report.coloured == report.entities
+    assert report.colour_conflicts == 2  # the scripted ID switch
+
+    con = sqlite3.connect(path)
+    try:
+        rows = dict(
+            con.execute(
+                "SELECT entity_id, colour FROM entities WHERE clip='synthetic-01'"
+            )
+        )
+        assert rows[1] == "red"
+        assert rows[2] == "blue"
+    finally:
+        con.close()
+
+
+def test_colour_is_null_when_the_clip_has_no_pixels(tmp_path):
+    """A cached run over a `synthetic://` clip has masks but no frames.
+
+    NULL is the honest answer, and a query for a red box then returns
+    nothing rather than something invented.
+    """
+    import sqlite3
+
+    from spatialsight.backends.synthetic import SyntheticBackend
+    from spatialsight.runner import run
+
+    path = tmp_path / "n.sqlite"
+    report, _, _ = run(
+        backend=SyntheticBackend("synthetic-01"),
+        clip="synthetic-01",
+        zones_path="zones/synthetic-01.json",
+        db_path=path,
+        with_colour=False,
+    )
+    assert report.coloured == 0
+
+    con = sqlite3.connect(path)
+    try:
+        colours = [r[0] for r in con.execute("SELECT colour FROM entities")]
+        assert colours and all(c is None for c in colours)
+    finally:
+        con.close()

@@ -57,7 +57,7 @@ def test_the_request_carries_the_system_prompt_and_the_key(db):
     assert request["authorization"] == "Bearer test-key"
     roles = [m["role"] for m in request["body"]["messages"]]
     assert roles == ["system", "user"]
-    assert "CREATE TABLE events" in request["body"]["messages"][0]["content"]
+    assert "events(" in request["body"]["messages"][0]["content"]
     assert request["body"]["temperature"] == 0, (
         "SQL wants the single most likely answer, not a creative one"
     )

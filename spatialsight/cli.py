@@ -307,6 +307,7 @@ def cmd_canned(args) -> int:
 def cmd_ask(args) -> int:
     cfg = config.load()
     from .query.nlsql import SparkClient, ask
+    from .query.qcache import default_cache
 
     client = SparkClient.from_config(cfg)
     answer = ask(
@@ -315,6 +316,7 @@ def cmd_ask(args) -> int:
         client,
         guard=SqlGuard(max_limit=args.limit),
         with_brief=not args.no_brief,
+        cache=default_cache(cfg.db_path, enabled=not args.no_cache),
     )
 
     print(f"Q: {answer.question}\n")
@@ -536,6 +538,11 @@ def build_parser() -> argparse.ArgumentParser:
     a.add_argument("question")
     a.add_argument("--limit", type=int, default=200)
     a.add_argument("--no-brief", action="store_true")
+    a.add_argument(
+        "--no-cache",
+        action="store_true",
+        help="re-ask the model even if this question was answered before",
+    )
     a.set_defaults(func=cmd_ask)
 
     bench = sub.add_parser(

@@ -188,3 +188,12 @@ def test_compression_falls_back_to_a_bitrate_estimate_for_simulated_clips():
     ratio = compression_ratio(meta, 32768)
     assert ratio["source_bytes"] > 0
     assert ratio["ratio"] > 1
+
+
+def test_a_correct_unrounded_answer_matches_a_rounded_reference():
+    """3.25 and ROUND(3.25, 1) are the same answer; Python and SQLite
+    disagree on which way the tie goes, and the grader must not."""
+    from spatialsight.query.bench import compare
+
+    verdict = compare([("east_road", 3.3)], ["zone", "m"], [("east_road", 3.25)], ["zone", "m"])
+    assert verdict == "exact"

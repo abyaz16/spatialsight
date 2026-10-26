@@ -124,7 +124,7 @@ def test_canned_questions_are_served_with_their_sql(api):
 
 
 def test_schema_is_served_for_the_prompt(api):
-    assert "CREATE TABLE events" in api.schema()["schema"]
+    assert "events(" in api.schema()["schema"]
 
 
 # ----- query routes ---------------------------------------------------------

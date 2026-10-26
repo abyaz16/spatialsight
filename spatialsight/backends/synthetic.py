@@ -37,6 +37,8 @@ class Actor:
     waypoints: list[tuple[int, float, float]]  # (frame, cx, cy)
     size: tuple[float, float]  # (width, height) in pixels
     visible: list[tuple[int, int]] = field(default_factory=list)  # inclusive spans
+    rgb: tuple[int, int, int] = (128, 128, 128)  # the colour it is painted
+    colour: str = "grey"  # and the name that colour must be read back as
 
     def position(self, frame: int) -> tuple[float, float] | None:
         if not any(a <= frame <= b for a, b in self.visible):
@@ -96,6 +98,8 @@ def default_scene() -> SyntheticScene:
             waypoints=[(0, 120, 180), (20, 240, 200), (90, 260, 210), (120, 900, 240)],
             size=(180.0, 120.0),
             visible=[(0, 120)],
+            rgb=(196, 32, 32),
+            colour="red",
         ),
         # 2. Steps out of frame at 60 and back at 68 -> a new object id for
         #    the same person. This is the identity split the stitcher exists
@@ -107,6 +111,8 @@ def default_scene() -> SyntheticScene:
             waypoints=[(0, 700, 500), (60, 1270, 520), (68, 1270, 520), (160, 640, 480)],
             size=(55.0, 130.0),
             visible=[(0, 60), (68, 160)],
+            rgb=(32, 72, 200),
+            colour="blue",
         ),
         # 3 & 4. Cross at frame ~130 in the pick aisle -> ids swap.
         Actor(
@@ -115,6 +121,8 @@ def default_scene() -> SyntheticScene:
             waypoints=[(100, 300, 620), (160, 1000, 640)],
             size=(55.0, 130.0),
             visible=[(100, 160)],
+            rgb=(36, 150, 60),
+            colour="green",
         ),
         Actor(
             truth_id=4,
@@ -122,6 +130,8 @@ def default_scene() -> SyntheticScene:
             waypoints=[(100, 1000, 660), (160, 300, 600)],
             size=(55.0, 130.0),
             visible=[(100, 160)],
+            rgb=(226, 196, 40),
+            colour="yellow",
         ),
         # 5. Loiters on the dock lower boundary -> occupancy hovers near 0.5.
         Actor(
@@ -130,6 +140,8 @@ def default_scene() -> SyntheticScene:
             waypoints=[(170, 300, 360), (190, 310, 372), (215, 300, 364), (239, 305, 368)],
             size=(55.0, 130.0),
             visible=[(170, 239)],
+            rgb=(238, 240, 244),
+            colour="white",
         ),
     ]
     return SyntheticScene(actors=actors, id_switch_at=(130, 3, 4))
@@ -209,3 +221,58 @@ class SyntheticBackend:
 
     def truth_actors(self) -> list[Actor]:
         return list(self.scene.actors)
+
+    def frame_reader(self) -> "SyntheticFrameReader":
+        """Pixels for the scene, so colour is exercised without a video file.
+
+        The painted actors are the ground truth the colour reader is scored
+        against: each sits in the middle of its hue band, on a background
+        chosen to be a colour no actor is, so a reader that leaked background
+        pixels into the average would be caught rather than merely be a
+        little off.
+        """
+        return SyntheticFrameReader(self.scene)
+
+
+# A mid grey-brown the actors are all far from in hue. If the mask were
+# leaking, every entity would drift toward this instead of its own colour.
+BACKGROUND_RGB = (104, 96, 88)
+
+
+class SyntheticFrameReader:
+    """Renders one frame of a `SyntheticScene` as an RGB array."""
+
+    def __init__(self, scene: SyntheticScene) -> None:
+        self.scene = scene
+
+    def frame(self, index: int):
+        import numpy as np
+
+        s = self.scene
+        if not 0 <= index < s.frame_count:
+            return None
+        canvas = np.empty((s.height, s.width, 3), dtype=np.uint8)
+        canvas[:, :] = BACKGROUND_RGB
+        for actor in s.actors:
+            pos = actor.position(index)
+            if pos is None:
+                continue
+            cx, cy = pos
+            w, h = actor.size
+            # The same ellipse the mask describes, filled with the actor's
+            # colour, so mask and pixels agree by construction.
+            y0, y1 = int(cy - h / 2), int(cy + h / 2)
+            x0, x1 = int(cx - w / 2), int(cx + w / 2)
+            ys = np.arange(max(0, y0), min(s.height, y1 + 1))
+            xs = np.arange(max(0, x0), min(s.width, x1 + 1))
+            if not len(ys) or not len(xs):
+                continue
+            ny = ((ys + 0.5 - cy) / (h / 2.0))[:, None]
+            nx = ((xs + 0.5 - cx) / (w / 2.0))[None, :]
+            inside = (nx * nx + ny * ny) <= 1.0
+            region = canvas[ys[0] : ys[-1] + 1, xs[0] : xs[-1] + 1]
+            region[inside] = actor.rgb
+        return canvas
+
+    def close(self) -> None:
+        return None
