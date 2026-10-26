@@ -30,13 +30,67 @@ from .types import Box, Detection, Track
 @dataclass(frozen=True)
 class TrackerParams:
     max_gap_frames: int = 12
-    """How long an entity may be unseen and still count as the same entity."""
+    """How long an entity may be unseen and still count as the same entity.
 
-    stitch_min_iou: float = 0.10
-    """Box overlap across the gap below which a stitch needs the distance test."""
+    In frames, so it only means a fixed duration once paired with a frame
+    rate: 12 frames is 6 seconds at 2 fps and 0.4 seconds at 30. Callers
+    should derive it from the clip (see `for_fps`) rather than take this
+    default, which suits the 2 fps simulated clip.
+    """
 
-    stitch_slack: float = 0.75
-    """Allowed error around the predicted position, in box diagonals."""
+    @classmethod
+    def for_fps(cls, fps: float, seconds: float = 1.0, **overrides) -> "TrackerParams":
+        """Parameters whose gap window is a duration rather than a frame count."""
+        return cls(max_gap_frames=max(1, int(round(fps * seconds))), **overrides)
+
+    stitch_min_iou: float = 0.50
+    """Box overlap that is conclusive on its own, bypassing the motion test.
+
+    Measured on MOT17: at 0.10 this shortcut alone caused 21 wrong merges,
+    because two different people standing near each other overlap 10% of
+    their boxes without difficulty. Raising it to 0.50 removed a third of all
+    merges. Above 0.50 nothing changes, so almost no genuine reconnection
+    depends on partial overlap -- it is either decisive or irrelevant.
+    """
+
+    stitch_slack: float = 0.10
+    """Base allowance around the prediction, in box diagonals.
+
+    Covers detection jitter on a stationary target. Tuned on MOT17, where
+    0.35 produced nearly twice the merges of 0.10 for a 3% gain in
+    fragmentation recovery -- a bad trade, because a merge invents a history
+    and a fragment only duplicates one.
+    """
+
+    stitch_slack_motion: float = 1.0
+    """Extra allowance per pixel the target was predicted to travel.
+
+    The tolerance has to scale with **motion**, not with box size. Scaling it
+    by the box put the radius near 280px on 1080p pedestrians, which in a
+    crowd is wider than the spacing between people, so the nearest candidate
+    was routinely the wrong person. A target drifting 5px per frame across a
+    10-frame gap could plausibly be 50px off its prediction, not 280.
+    """
+
+    stitch_slack_cap: float = 2.0
+    """Ceiling on the allowance, in box diagonals.
+
+    Without a ceiling the allowance grows linearly with the gap, and on a
+    1920x1080 sequence a 60-frame gap put the search radius at 1,476 px --
+    most of the scene. Past a point a prediction is not degraded but
+    worthless, and the honest response is to refuse the stitch rather than
+    accept whoever is nearest.
+    """
+
+    ambiguity_ratio: float = 2.5
+    """How much better the best candidate must be than the runner-up.
+
+    In a crowd several people fit a prediction. Picking the closest is a coin
+    flip that produces a merge -- two real people fused into one history,
+    which nothing downstream can detect. When two candidates are within this
+    ratio the reconnection is refused, leaving two entities instead. That is
+    the safe error: it over-counts rather than inventing a history.
+    """
 
     stitch_max_size_ratio: float = 2.5
     """Reject a stitch when the two boxes differ in area by more than this."""
@@ -78,6 +132,10 @@ class Reconciliation:
     @property
     def dropped(self) -> int:
         return sum(1 for r in self.repairs if r.kind == "dropped")
+
+    @property
+    def ambiguous(self) -> int:
+        return sum(1 for r in self.repairs if r.kind == "ambiguous")
 
 
 def _diag(box: Box) -> float:
@@ -138,14 +196,35 @@ def _can_stitch(
     if tail.box.iou(head.box) >= params.stitch_min_iou:
         return True
 
+    return _residual(tail_segment, head) <= _allowance(tail_segment, head, params)
+
+
+def _residual(tail_segment: list[Detection], head: Detection) -> float:
+    """How far the candidate landed from where the tail was heading."""
+    tail = tail_segment[-1]
+    gap = head.frame - tail.frame
     vx, vy = _velocity(tail_segment)
     tx, ty = tail.box.centroid
-    px, py = tx + vx * gap, ty + vy * gap
     hx, hy = head.box.centroid
-    residual = hypot(hx - px, hy - py)
-    # Tolerance grows with the gap, because a prediction degrades over time.
-    allowance = params.stitch_slack * _diag(tail.box) * (1.0 + 0.1 * gap)
-    return residual <= allowance
+    return hypot(hx - (tx + vx * gap), hy - (ty + vy * gap))
+
+
+def _allowance(
+    tail_segment: list[Detection], head: Detection, params: TrackerParams
+) -> float:
+    """How far from the prediction a candidate may land, in pixels.
+
+    Widens with the gap, because a prediction degrades, but is capped: past
+    the ceiling the prediction carries no information and a wider radius only
+    buys false matches.
+    """
+    tail = tail_segment[-1]
+    gap = head.frame - tail.frame
+    vx, vy = _velocity(tail_segment)
+    travelled = hypot(vx, vy) * gap
+    diagonal = _diag(tail.box)
+    allowance = params.stitch_slack * diagonal + params.stitch_slack_motion * travelled
+    return min(allowance, params.stitch_slack_cap * diagonal)
 
 
 def reconcile(
@@ -182,25 +261,36 @@ def reconcile(
         while True:
             tail_segment = chain[-1][1]
             tail = tail_segment[-1]
-            best: tuple[float, int] | None = None
+            # Score every candidate that passes the gate, then insist the
+            # winner is clearly better than the runner-up.
+            scored: list[tuple[float, int]] = []
             for j, cand in enumerate(segments):
                 if j in used:
                     continue
                 head = cand[1][0]
                 if not _can_stitch(tail_segment, head, params):
                     continue
-                # Among the candidates that pass the gate, take the one
-                # closest to where the entity was actually heading.
-                vx, vy = _velocity(tail_segment)
-                gap = head.frame - tail.frame
-                px, py = tail.box.centroid
-                hx, hy = head.box.centroid
-                cost = hypot(hx - (px + vx * gap), hy - (py + vy * gap)) + gap
-                if best is None or cost < best[0]:
-                    best = (cost, j)
-            if best is None:
+                scored.append((_residual(tail_segment, head), j))
+            if not scored:
                 break
-            j = best[1]
+            scored.sort()
+            if len(scored) > 1:
+                best_cost, runner_up = scored[0][0], scored[1][0]
+                # Guard the degenerate case where the prediction lands exactly
+                # on two candidates: a zero-distance tie is maximally ambiguous.
+                if best_cost <= 0.0 and runner_up <= 0.0:
+                    break
+                if best_cost * params.ambiguity_ratio > runner_up:
+                    repairs.append(
+                        Repair(
+                            "ambiguous",
+                            f"refused to reconnect {chain[-1][0]} at frame "
+                            f"{tail.frame}: two candidates fit the prediction "
+                            f"({best_cost:.0f}px vs {runner_up:.0f}px)",
+                        )
+                    )
+                    break
+            j = scored[0][1]
             used.add(j)
             repairs.append(
                 Repair(

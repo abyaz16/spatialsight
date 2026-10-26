@@ -219,8 +219,10 @@ def cmd_ingest(args) -> int:
         clip=args.clip,
         zones_path=zones_path,
         db_path=cfg.db_path,
-        tracker_params=TrackerParams(
-            max_gap_frames=args.max_gap, min_detections=args.min_detections
+        tracker_params=TrackerParams.for_fps(
+            backend.meta().fps,
+            args.max_gap_seconds,
+            min_detections=args.min_detections,
         ),
         event_params=EventParams(enter_at=args.enter_at, exit_at=args.exit_at),
     )
@@ -342,6 +344,26 @@ def cmd_bench(args) -> int:
     if args.json:
         Path(args.json).write_text(json.dumps(report.as_dict(), indent=2), encoding="utf-8")
         print(f"\nwrote {args.json}")
+    return 0
+
+
+def cmd_mot(args) -> int:
+    from .motbench import run_mot, write_report
+
+    report = run_mot(
+        args.root,
+        patience=args.patience,
+        gap_seconds=args.gap_seconds,
+        min_visibility=args.min_visibility,
+    )
+    if not report.results:
+        raise SystemExit(
+            f"no MOT sequences under {args.root}. Download MOT17Labels.zip from "
+            f"motchallenge.net and extract it, then pass --root <...>/train."
+        )
+    print("\n".join(report.lines()))
+    if args.json:
+        print(f"\nwrote {write_report(report, args.json)}")
     return 0
 
 
@@ -470,7 +492,12 @@ def build_parser() -> argparse.ArgumentParser:
     ing.add_argument("--imgsz", type=int, default=960)
     ing.add_argument("--zones", default=None)
     ing.add_argument("--allow-spend", action="store_true", help="permit paid API calls")
-    ing.add_argument("--max-gap", type=int, default=12)
+    ing.add_argument(
+        "--max-gap-seconds",
+        type=float,
+        default=0.5,
+        help="how long an entity may be unseen and still be the same entity",
+    )
     ing.add_argument(
         "--min-detections",
         type=int,
@@ -508,6 +535,21 @@ def build_parser() -> argparse.ArgumentParser:
     )
     bench.add_argument("--json", default=None)
     bench.set_defaults(func=cmd_bench)
+
+    mot = sub.add_parser(
+        "mot", help="score ID reconciliation against MOT17 ground truth"
+    )
+    mot.add_argument("--root", default="E:/data-mot/mot17/train")
+    mot.add_argument(
+        "--patience",
+        type=int,
+        default=5,
+        help="frames the upstream tracker keeps an unseen target alive",
+    )
+    mot.add_argument("--gap-seconds", type=float, default=1.0)
+    mot.add_argument("--min-visibility", type=float, default=0.25)
+    mot.add_argument("--json", default=None)
+    mot.set_defaults(func=cmd_mot)
 
     ev2 = sub.add_parser("eval", help="score the pipeline against ground truth")
     ev2.add_argument("clip", nargs="?", default="synthetic-01")

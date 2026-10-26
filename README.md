@@ -151,6 +151,35 @@ answer with nothing behind it has to be taken on faith.
 
 ## Measurement
 
+Three levels, because they answer different questions.
+
+### Against MOT17 — our code on real human motion
+
+```bash
+./scripts/ss mot            # 7 sequences, 519 hand-annotated identities
+```
+
+The boxes are human annotations, so detection error is exactly zero and
+anything wrong is ours. Realistic fragmentation is derived from the
+annotations' own occlusion gaps, as an upstream tracker would produce.
+
+| | true | upstream | ours | merges | recovered |
+|---|---|---|---|---|---|
+| 7 sequences | 519 | 937 | 753 | 7.1% | 44% |
+
+Reconciliation removes 44% of the upstream over-count (1.8× → 1.5×) while
+merging 7.1% of identities. The first attempt merged 18.9%; the gap between
+those two numbers is three bugs that only ground truth could expose, written
+up in [docs/FINDINGS.md](docs/FINDINGS.md).
+
+Merges and fragments are deliberately *not* weighted equally. A fragment
+reports one person as two entities — the count is too high but every history
+is real. A merge reports two people as one, with a dwell assembled from two
+different people: the count is too low *and* the history is fabricated, and
+nothing downstream can detect it.
+
+### Against the simulated clip — the layers end to end
+
 Run `./scripts/ss eval --from-cache`. The report separates two errors that have
 different fixes:
 
@@ -222,7 +251,8 @@ ss events   [clip]            print the events table
 ss sql      "<select ...>"    run SQL through the guard
 ss ask      "<question>"      English → SQL → rows → brief  (needs a key)
 ss canned   [key]             the ten reference questions   (no key)
-ss eval     [clip]            score against ground truth
+ss eval     [clip]            score against the simulated clip
+ss mot                        score reconciliation against MOT17 ground truth
 ss cache                      what has been paid for, and what it cost
 ss schema                     the schema pinned into the SQL prompt
 ```

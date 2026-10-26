@@ -99,3 +99,53 @@ def test_stitch_window_is_configurable():
     assert len(reconcile(dets).tracks) == 2
     loose = TrackerParams(max_gap_frames=30)
     assert len(reconcile(dets, loose).tracks) == 1
+
+
+# ----- what MOT17 taught, pinned so it cannot regress ----------------------
+
+
+def test_partial_box_overlap_alone_does_not_justify_a_stitch():
+    """Two different people standing near each other overlap ~10% of their boxes.
+
+    When that was enough to bypass the motion test, it caused 21 wrong merges
+    on MOT17 by itself. Overlap is now only conclusive when it is decisive.
+    """
+    dets = [det(f, "1", 0, 0, w=100, h=260) for f in range(0, 10)]
+    # A different person, 10% box overlap, nowhere near the predicted path.
+    dets += [det(f, "2", 90, 0, w=100, h=260) for f in range(12, 20)]
+    r = reconcile(dets)
+    assert len(r.tracks) == 2, "partial overlap must not short-circuit the gate"
+
+
+def test_decisive_box_overlap_still_reconnects():
+    dets = [det(f, "1", 0, 0, w=100, h=260) for f in range(0, 10)]
+    dets += [det(f, "2", 5, 0, w=100, h=260) for f in range(12, 20)]
+    assert len(reconcile(dets).tracks) == 1
+
+
+def test_an_ambiguous_reconnection_is_refused_rather_than_guessed():
+    """Two candidates fitting one prediction is a coin flip, and a wrong flip
+    welds two people into one history that nothing downstream can detect."""
+    # Walks right at 5px/frame, so from frame 9 the prediction for frame 12
+    # is centred at (80, 150).
+    dets = [det(f, "1", f * 5, 100, w=40, h=100) for f in range(0, 10)]
+    # Two continuations straddling that prediction, each 10px off it: both
+    # well inside the tolerance, and neither better than the other.
+    dets += [det(f, "a", 60 + (f - 12) * 5, 90, w=40, h=100) for f in range(12, 18)]
+    dets += [det(f, "b", 60 + (f - 12) * 5, 110, w=40, h=100) for f in range(12, 18)]
+    r = reconcile(dets)
+    assert r.ambiguous >= 1, "the tie must be detected, not broken arbitrarily"
+    assert len(r.tracks) == 3, "an ambiguous match must not be guessed"
+
+
+def test_the_gap_window_is_a_duration_not_a_frame_count():
+    """12 frames is 6 seconds at 2fps and 0.4 seconds at 30fps.
+
+    A fixed frame count silently means different things per clip, which is
+    how a window tuned on the 2fps simulated clip became far too permissive
+    on 30fps footage.
+    """
+    assert TrackerParams.for_fps(2.0, 1.0).max_gap_frames == 2
+    assert TrackerParams.for_fps(30.0, 1.0).max_gap_frames == 30
+    assert TrackerParams.for_fps(30.0, 0.5).max_gap_frames == 15
+    assert TrackerParams.for_fps(0.1, 1.0).max_gap_frames >= 1

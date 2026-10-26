@@ -210,7 +210,97 @@ defaults to `%APPDATA%` on C:.
 
 ---
 
-## 5. What this does and does not establish
+## 5. MOT17: the reconciliation measured on real human motion
+
+The simulated clip shows the deterministic layers are self-consistent. It
+cannot show they survive how people actually move. MOT17 can: 7 sequences,
+**519 hand-annotated identities**, 53,000 boxes, real occlusions and real
+crossings.
+
+**The boxes are human annotations, so detection error is exactly zero.**
+Anything wrong here is ours. The realistic input is derived from the
+annotations themselves: wherever a true identity disappears for longer than
+an upstream tracker's patience — which is what an occlusion looks like — it
+gets a fresh id on return, exactly as SAM 3.1 or ByteTrack would. The
+fragmentation comes from real occlusions, not from random injection.
+
+### Result
+
+```
+                 true  upstream  ours  MERGES  recovered
+  TOTAL           519       937   753      37        44%
+
+  without us   937 entities for 519 people   (1.8x over-count, 0 merges)
+  with us      753 entities                  (1.5x over-count, 7.1% merged)
+```
+
+Reconciliation removes **44% of the upstream over-count**, at the cost of
+merging 7.1% of identities.
+
+### The first attempt was much worse, and the numbers said so
+
+The initial run merged **18.9%** of identities. Three separate causes, each
+invisible without ground truth:
+
+| Cause | Effect |
+|---|---|
+| Tolerance grew without bound with gap length | At a 60-frame gap the search radius was 1,476 px on a 1,920 px frame — most of the scene |
+| Tolerance scaled with **box size**, not motion | ~280 px for a 1080p pedestrian, wider than the spacing between people in a crowd |
+| A 10% box overlap bypassed every motion check | 21 merges on its own; two people standing near each other overlap 10% without difficulty |
+
+Fixes: cap the tolerance, scale it by predicted travel rather than box size,
+raise the overlap shortcut to 0.50, and refuse a reconnection when two
+candidates both fit — ambiguity should block a merge, not break the tie.
+Above 0.50 the overlap threshold changes nothing, so a genuine reconnection
+is either decisive or does not depend on overlap at all.
+
+### The trade-off is a curve, not a setting
+
+Measured across all sequences, tuning the gap window and tolerance:
+
+| gap window | entities | merges | over-count | fragmentation removed |
+|---|---|---|---|---|
+| 0.15 s | 864 | 3.9% | 1.66× | 17% |
+| 0.25 s | 839 | 6.4% | 1.62× | 23% |
+| **0.50 s** | **753** | **7.1%** | **1.45×** | **44%** |
+| 0.75 s | 686 | 11.2% | 1.32× | 60% |
+
+The default sits at 0.50 s. Merges are weighted far more heavily than
+fragments, because they are not symmetric errors:
+
+- A **fragment** reports one person as two entities. The count is too high;
+  every history is real.
+- A **merge** reports two people as one entity, with a dwell assembled from
+  two different people. The count is too low *and* the history is fabricated.
+  Nothing downstream can detect it.
+
+### The floor, and why it is not zero
+
+With stitching disabled entirely: **0 merges, 882 entities**. So every merge
+is one we introduce, and the curve above is the real price of reconnection.
+
+Some are irreducible. Two of the merges join people whose boxes overlap
+**88% and 65%** two to twelve frames apart — two annotated people occupying
+nearly the same pixels. No geometric method separates those. Going below
+roughly 4% needs an appearance embedding per entity, which is a different
+system.
+
+### The gap window is a deployment parameter, not a constant
+
+12 frames is 6 seconds at 2 fps and 0.4 seconds at 30. A window expressed in
+frames silently means different things per clip, which is how one tuned on
+the 2 fps simulated clip became far too permissive on 30 fps footage.
+`TrackerParams.for_fps` now takes a duration.
+
+Even as a duration it is not universal. 0.5 s is right for crowded 30 fps
+pedestrian footage, where many candidates are confusable. The 2 fps warehouse
+clip needs ~5 s, because a single frame there *is* half a second and the
+scene is sparse enough that a long window is safe. Density, not just frame
+rate, decides — so it is exposed as `--max-gap-seconds` rather than guessed.
+
+---
+
+## 6. What this does and does not establish
 
 **Does:** the pipeline runs end to end on real footage. Segmentation,
 re-identification, pixel-level zone occupancy, hysteresis, SQL compilation,
