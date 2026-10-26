@@ -1,0 +1,24 @@
+#!/usr/bin/env bash
+# Serve a Meta open-weights model locally on the GPU, OpenAI-compatible.
+#
+# Then point the pipeline at it:
+#   LLM_BASE_URL=http://127.0.0.1:8080/v1 LLM_MODEL=llama-3.2-3b ./scripts/ss ask "..."
+#
+# Llama 3.2 3B is a Meta model, so it is within the hackathon's rules as an
+# open-weights model. It is far smaller than Muse Spark, and the NL->SQL
+# benchmark (`ss bench`) shows exactly how much that costs.
+set -euo pipefail
+LLAMA_DIR="${LLAMA_DIR:-E:/models/llama.cpp}"
+MODEL="${LLM_GGUF:-E:/models/Llama-3.2-3B-Instruct-Q4_K_M.gguf}"
+PORT="${LLM_PORT:-8080}"
+
+exec "$LLAMA_DIR/llama-server.exe" \
+  --model "$MODEL" \
+  --alias llama-3.2-3b \
+  --host 127.0.0.1 \
+  --port "$PORT" \
+  --n-gpu-layers 99 \
+  --ctx-size 8192 \
+  --parallel 1 \
+  --temp 0 \
+  "$@"

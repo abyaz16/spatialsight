@@ -130,6 +130,19 @@ def cmd_resample(args) -> int:
     return 0
 
 
+def cmd_convert(args) -> int:
+    """Re-encode any clip to H.264 MP4 at its own frame rate."""
+    from .probe import probe_video, resample
+
+    out = resample(args.video, args.out, fps=None)
+    meta = probe_video(out, strict=True)
+    print(
+        f"wrote {out} -- {meta.width}x{meta.height}, {meta.frame_count} frames "
+        f"at {meta.fps:g} fps, {meta.duration_s:.1f}s"
+    )
+    return 0
+
+
 def cmd_poster(args) -> int:
     from .probe import extract_frame
 
@@ -163,6 +176,16 @@ def cmd_ingest(args) -> int:
         from .backends.synthetic import SyntheticBackend
 
         backend = SyntheticBackend(args.clip)
+    elif args.video and args.local:
+        from .backends.local import LocalBackend
+
+        backend = LocalBackend(
+            args.video,
+            cache_dir=cfg.cache_dir,
+            weights=args.weights,
+            device=args.device,
+            imgsz=args.imgsz,
+        )
     elif args.video:
         from .backends.sam import SamBackend
 
@@ -205,6 +228,11 @@ def cmd_ingest(args) -> int:
         for r in recon.repairs:
             print(f"  {r.kind:<7} {r.detail}")
     spend = getattr(backend, "last_run", {})
+    if spend.get("seconds"):
+        print(
+            f"\nsegmented {spend['frames']} frames in {spend['seconds']}s "
+            f"({spend['fps']} fps on {spend['device']}), cost $0.00"
+        )
     if spend.get("requests_billed"):
         print(f"\nbilled requests  {spend['requests_billed']}")
         print(f"estimated spend  ${spend['est_usd_this_run']:.4f}")
@@ -275,7 +303,7 @@ def cmd_ask(args) -> int:
     cfg = config.load()
     from .query.nlsql import SparkClient, ask
 
-    client = SparkClient(cfg.api_key or "", cfg.api_base, cfg.spark_model)
+    client = SparkClient.from_config(cfg)
     answer = ask(
         args.question,
         cfg.db_path,
@@ -298,6 +326,20 @@ def cmd_ask(args) -> int:
         print(f"\nbrief:\n{answer.brief}")
     if answer.usage:
         print(f"\ntokens: {answer.usage}")
+    return 0
+
+
+def cmd_bench(args) -> int:
+    cfg = config.load()
+    from .query.bench import run_bench
+    from .query.nlsql import SparkClient
+
+    client = SparkClient.from_config(cfg)
+    report = run_bench(cfg.db_path, client, endpoint=cfg.llm_base_url)
+    print("\n".join(report.lines()))
+    if args.json:
+        Path(args.json).write_text(json.dumps(report.as_dict(), indent=2), encoding="utf-8")
+        print(f"\nwrote {args.json}")
     return 0
 
 
@@ -397,6 +439,11 @@ def build_parser() -> argparse.ArgumentParser:
     res.add_argument("--seconds", type=float, default=None)
     res.set_defaults(func=cmd_resample)
 
+    conv = sub.add_parser("convert", help="re-encode any clip to H.264 MP4")
+    conv.add_argument("video")
+    conv.add_argument("out")
+    conv.set_defaults(func=cmd_convert)
+
     poster = sub.add_parser("poster", help="extract one frame to draw zones against")
     poster.add_argument("video")
     poster.add_argument("out")
@@ -411,6 +458,14 @@ def build_parser() -> argparse.ArgumentParser:
     ing.add_argument("clip")
     ing.add_argument("--video", default=None, help="segment this file with SAM 3.1")
     ing.add_argument("--synthetic", action="store_true", help="simulate, no parser")
+    ing.add_argument(
+        "--local",
+        action="store_true",
+        help="segment --video with the free local stand-in (YOLO11-seg) instead of SAM 3.1",
+    )
+    ing.add_argument("--weights", default="E:/models/yolo11s-seg.pt")
+    ing.add_argument("--device", default="0", help="GPU index, or cpu")
+    ing.add_argument("--imgsz", type=int, default=960)
     ing.add_argument("--zones", default=None)
     ing.add_argument("--allow-spend", action="store_true", help="permit paid API calls")
     ing.add_argument("--max-gap", type=int, default=12)
@@ -439,6 +494,12 @@ def build_parser() -> argparse.ArgumentParser:
     a.add_argument("--limit", type=int, default=200)
     a.add_argument("--no-brief", action="store_true")
     a.set_defaults(func=cmd_ask)
+
+    bench = sub.add_parser(
+        "bench", help="ask the ten reference questions in English and score the SQL"
+    )
+    bench.add_argument("--json", default=None)
+    bench.set_defaults(func=cmd_bench)
 
     ev2 = sub.add_parser("eval", help="score the pipeline against ground truth")
     ev2.add_argument("clip", nargs="?", default="synthetic-01")

@@ -37,10 +37,63 @@ def ffprobe_path() -> str:
 
 
 def ffmpeg_path() -> str:
+    """A system ffmpeg if there is one, else the binary bundled by imageio-ffmpeg.
+
+    The bundled one installs with pip into the virtualenv, which matters on a
+    machine whose system drive has no room for a winget install.
+    """
     exe = shutil.which("ffmpeg")
-    if exe is None:
-        raise RuntimeError(FFPROBE_HINT.replace("ffprobe", "ffmpeg"))
-    return exe
+    if exe is not None:
+        return exe
+    try:
+        import imageio_ffmpeg
+
+        return imageio_ffmpeg.get_ffmpeg_exe()
+    except ImportError as exc:
+        raise RuntimeError(
+            FFPROBE_HINT.replace("ffprobe", "ffmpeg")
+            + "\n  or: pip install imageio-ffmpeg"
+        ) from exc
+
+
+def _probe_with_opencv(path: Path, strict: bool) -> VideoMeta:
+    """Probe without ffprobe, by decoding.
+
+    Frame count comes from actually reading every frame rather than trusting
+    the container's header, which OpenCV reports approximately for some
+    codecs. That costs a full decode, which is acceptable for clips short
+    enough to segment and is the price of the timestamps being right.
+    """
+    import cv2
+
+    if strict and path.suffix.lower() not in SUPPORTED_CONTAINERS:
+        raise ValueError(
+            f"{path.name}: SAM 3.1 accepts MP4 or MOV, not {path.suffix}. "
+            f"Convert it with `ss convert`."
+        )
+    cap = cv2.VideoCapture(str(path))
+    if not cap.isOpened():
+        raise ValueError(f"{path.name}: could not open video")
+    try:
+        fps = float(cap.get(cv2.CAP_PROP_FPS) or 0.0)
+        width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+        height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+        frames = 0
+        while cap.grab():
+            frames += 1
+    finally:
+        cap.release()
+    if fps <= 0:
+        raise ValueError(f"{path.name}: could not determine frame rate")
+    return VideoMeta(
+        path=str(path),
+        width=width,
+        height=height,
+        fps=fps,
+        frame_count=frames,
+        duration_s=frames / fps,
+        sha256=sha256_file(path),
+    )
 
 
 def sha256_file(path: str | Path, chunk: int = 1 << 20) -> str:
@@ -64,6 +117,8 @@ def probe_video(path: str | Path, *, strict: bool = True) -> VideoMeta:
     path = Path(path)
     if not path.exists():
         raise FileNotFoundError(path)
+    if shutil.which("ffprobe") is None:
+        return _probe_with_opencv(path, strict)
 
     out = subprocess.run(
         [
@@ -122,7 +177,12 @@ def probe_video(path: str | Path, *, strict: bool = True) -> VideoMeta:
 
 
 def resample(
-    src: str | Path, dst: str | Path, fps: float, *, start: float = 0.0, seconds: float | None = None
+    src: str | Path,
+    dst: str | Path,
+    fps: float | None,
+    *,
+    start: float = 0.0,
+    seconds: float | None = None,
 ) -> Path:
     """Write a trimmed, re-timed copy of a clip.
 
@@ -139,8 +199,9 @@ def resample(
     cmd += ["-i", str(src)]
     if seconds is not None:
         cmd += ["-t", str(seconds)]
+    if fps is not None:
+        cmd += ["-vf", f"fps={fps}"]
     cmd += [
-        "-vf", f"fps={fps}",
         "-an",
         "-c:v", "libx264",
         "-preset", "veryfast",

@@ -84,8 +84,9 @@ class Api:
             "database": str(self.cfg.db_path),
             "database_exists": self.cfg.db_path.exists(),
             "clips": sorted(self.manifest()),
-            "spark_model": self.cfg.spark_model,
-            "natural_language": self.cfg.has_key,
+            "spark_model": self.cfg.llm_model,
+            "llm_endpoint": self.cfg.llm_base_url,
+            "natural_language": self.cfg.has_llm,
         }
 
     def clips(self) -> dict:
@@ -199,6 +200,18 @@ class Api:
 
     def _detections_for(self, clip: str, entry: dict):
         """Reproduce a clip's detections from whatever produced them."""
+        if str(entry.get("backend", "")).startswith("yolo"):
+            from .backends.local import LocalBackend
+
+            path = Path(entry["path"])
+            if not path.is_absolute():
+                path = config.REPO_ROOT / path
+            # Cached on first ingest, so this is a file read, not a GPU pass.
+            return LocalBackend(
+                path,
+                cache_dir=self.cfg.cache_dir,
+                weights=entry.get("weights", "E:/models/yolo11s-seg.pt"),
+            ).detect()
         if entry.get("backend") == "fixture" or "concepts" in entry:
             from .backends.sam import CachedSamBackend
 
@@ -243,9 +256,7 @@ class Api:
 
         with self._spark_lock:
             if self._spark is None:
-                self._spark = SparkClient(
-                    self.cfg.api_key or "", self.cfg.api_base, self.cfg.spark_model
-                )
+                self._spark = SparkClient.from_config(self.cfg)
             return self._spark
 
     def ask(self, question: str) -> dict:
@@ -433,7 +444,7 @@ def serve(host: str = "127.0.0.1", port: int = 8000) -> None:
     httpd = ThreadingHTTPServer((host, port), Handler)
     print(f"SpatialSight API on http://{host}:{port}")
     print(f"  database          {cfg.db_path}")
-    print(f"  natural language  {'enabled' if cfg.has_key else 'disabled (no key)'}")
+    print(f"  natural language  {cfg.llm_model + ' via ' + cfg.llm_base_url if cfg.has_llm else 'disabled (no key or LLM_BASE_URL)'}")
     try:
         httpd.serve_forever()
     except KeyboardInterrupt:

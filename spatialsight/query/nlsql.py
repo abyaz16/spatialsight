@@ -105,20 +105,34 @@ def schema_context(db_path: str | Path) -> dict[str, list[str]]:
 class SparkClient:
     """Thin wrapper over the Meta Model API for text completion."""
 
-    def __init__(self, api_key: str, api_base: str, model: str) -> None:
-        if not api_key:
+    def __init__(
+        self,
+        api_key: str | None,
+        api_base: str,
+        model: str,
+        *,
+        api_style: str = "responses",
+        require_key: bool = True,
+    ) -> None:
+        if require_key and not api_key:
             raise RuntimeError(
                 "MODEL_API_KEY is not set. Copy .env.example to .env and add the "
-                "key from dev.meta.ai, or run with --offline to use the canned "
-                "question set."
+                "key from dev.meta.ai, or point LLM_BASE_URL at a local llama.cpp "
+                "server (see scripts/llm)."
             )
+        if api_style not in ("responses", "chat"):
+            raise ValueError(f"api_style must be 'responses' or 'chat', not {api_style!r}")
         from openai import OpenAI
 
-        self.client = OpenAI(base_url=api_base, api_key=api_key)
+        # A local server ignores the key, but the SDK insists on one.
+        self.client = OpenAI(base_url=api_base, api_key=api_key or "local", timeout=120)
         self.model = model
+        self.api_style = api_style
         self.usage: dict[str, int] = {"input_tokens": 0, "output_tokens": 0, "calls": 0}
 
     def complete(self, system: str, user: str, *, max_output_tokens: int = 700) -> str:
+        if self.api_style == "chat":
+            return self._complete_chat(system, user, max_output_tokens)
         response = self.client.responses.create(
             model=self.model,
             instructions=system,
@@ -131,6 +145,36 @@ class SparkClient:
             self.usage["output_tokens"] += getattr(usage, "output_tokens", 0) or 0
         self.usage["calls"] += 1
         return (response.output_text or "").strip()
+
+    def _complete_chat(self, system: str, user: str, max_output_tokens: int) -> str:
+        """Chat completions, for llama.cpp and OpenAI-compatible free tiers."""
+        response = self.client.chat.completions.create(
+            model=self.model,
+            messages=[
+                {"role": "system", "content": system},
+                {"role": "user", "content": user},
+            ],
+            max_tokens=max_output_tokens,
+            # SQL wants the single most likely answer, not a creative one.
+            temperature=0,
+        )
+        usage = getattr(response, "usage", None)
+        if usage is not None:
+            self.usage["input_tokens"] += getattr(usage, "prompt_tokens", 0) or 0
+            self.usage["output_tokens"] += getattr(usage, "completion_tokens", 0) or 0
+        self.usage["calls"] += 1
+        content = response.choices[0].message.content if response.choices else ""
+        return (content or "").strip()
+
+    @classmethod
+    def from_config(cls, cfg) -> "SparkClient":
+        return cls(
+            cfg.llm_api_key,
+            cfg.llm_base_url,
+            cfg.llm_model,
+            api_style=cfg.llm_api_style,
+            require_key=not cfg.llm_explicit,
+        )
 
 
 def ask(

@@ -1,0 +1,7 @@
+# Optional: free local segmentation stand-in (YOLO11-seg + ByteTrack).
+# Install CUDA PyTorch first so pip does not pull the CPU build:
+#   pip install torch torchvision --index-url https://download.pytorch.org/whl/cu126
+-r requirements.txt
+ultralytics==8.4.189
+lap==0.5.13
+imageio-ffmpeg==0.6.0
